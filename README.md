@@ -1,64 +1,66 @@
-<div align="left" style="position: relative;">
-<img src="https://raw.githubusercontent.com/PKief/vscode-material-icon-theme/ec559a9f6bfd399b82bb44393651661b08aaf7ba/icons/folder-markdown-open.svg" align="right" width="30%" style="margin: -20px 0 0 20px;">
-<h1>FIREWALL-BLOCKLIST-UPDATER</h1>
-<p align="left">
-	<em>Securing Networks, One Update at a Time!</em>
+<p align="center">
+    <img src="https://cdn-icons-png.flaticon.com/512/6295/6295417.png" align="center" width="30%">
 </p>
-<p align="left">
+<p align="center"><h1 align="center">FIREWALL-BLOCKLIST-UPDATER</h1></p>
+<p align="center">
+	<em>Securing Networks, One Update at a Time.</em>
+</p>
+<p align="center">
 	<img src="https://img.shields.io/github/license/gbzret4d/firewall-blocklist-updater?style=default&logo=opensourceinitiative&logoColor=white&color=0080ff" alt="license">
 	<img src="https://img.shields.io/github/last-commit/gbzret4d/firewall-blocklist-updater?style=default&logo=git&logoColor=white&color=0080ff" alt="last-commit">
 	<img src="https://img.shields.io/github/languages/top/gbzret4d/firewall-blocklist-updater?style=default&color=0080ff" alt="repo-top-language">
 	<img src="https://img.shields.io/github/languages/count/gbzret4d/firewall-blocklist-updater?style=default&color=0080ff" alt="repo-language-count">
 </p>
-<p align="left"><!-- default option, no dependency badges. -->
+<p align="center"><!-- default option, no dependency badges. -->
 </p>
-<p align="left">
+<p align="center">
 	<!-- default option, no dependency badges. -->
 </p>
-</div>
-<br clear="right">
+<br>
 
-##  Table of Contents
+## 🔗 Table of Contents
 
-- [ Overview](#-overview)
-- [ Features](#-features)
-- [ Project Structure](#-project-structure)
-  - [ Project Index](#-project-index)
-- [ Getting Started](#-getting-started)
-  - [ Prerequisites](#-prerequisites)
-  - [ Installation](#-installation)
-  - [ Usage](#-usage)
-  - [ Testing](#-testing)
-- [ Project Roadmap](#-project-roadmap)
-- [ Contributing](#-contributing)
-- [ License](#-license)
-- [ Acknowledgments](#-acknowledgments)
-
----
-
-##  Overview
-
-The Firewall-Blocklist-Updater is a robust open-source project designed to enhance network security. It efficiently updates firewall blocklists, managing both IPv4 and IPv6, and dynamically maintains a whitelist of trusted IP addresses. With a focus on secure and efficient operations, it's an essential tool for system administrators, cybersecurity professionals, and anyone looking to fortify their network against potential threats.
+- [📍 Overview](#-overview)
+- [👾 Features](#-features)
+- [📁 Project Structure](#-project-structure)
+  - [📂 Project Index](#-project-index)
+- [🚀 Getting Started](#-getting-started)
+  - [☑️ Prerequisites](#-prerequisites)
+  - [⚙️ Installation](#-installation)
+  - [🤖 Usage](#🤖-usage)
+  - [🧪 Testing](#🧪-testing)
+- [📌 Project Roadmap](#-project-roadmap)
+- [🔰 Contributing](#-contributing)
+- [🎗 License](#-license)
+- [🙌 Acknowledgments](#-acknowledgments)
 
 ---
 
-##  Features
+## 📍 Overview
+
+The Firewall Blocklist Updater is an essential tool designed to bolster network security by automating the update of firewall blocklists. It efficiently manages and refreshes lists of unauthorized IPs and harmful domains, ensuring robust protection against emerging threats. Ideal for tech professionals in dynamic network environments, this script supports both IPv4 and IPv6, features parallel downloading for speed, and offers secure API key handling. It's a pivotal solution for maintaining continuous, up-to-date network defenses without manual oversight.
+
+---
+
+## 👾 Features
 
 |      | Feature         | Summary       |
 | :--- | :---:           | :---          |
-| ⚙️  | **Architecture**  | <ul><li>The project is structured around a main script `update-firewall-blocklists.sh` and two source files for whitelist and blocklist.</li><li>The architecture supports both IPv4 and IPv6.</li><li>The project is designed to work with containers, eliminating the need for sudo privileges.</li></ul> |
-| 🔩 | **Code Quality**  | <ul><li>The main script is well-structured and modular, making it easy to understand and maintain.</li><li>The codebase uses shell scripting language, which is ideal for automation tasks like this project.</li></ul> |
-| 📄 | **Documentation** | <ul><li>The primary language used in the project is shell scripting, with a total of 1 shell script and 4 source files.</li><li>There is no explicit documentation available in the codebase, which could be improved for better understanding and usage of the project.</li></ul> |
-| 🔌 | **Integrations**  | <ul><li>The project integrates with external IP lists for both whitelist and blocklist sources.</li><li>The script is designed to work with containers, indicating potential for integration with container orchestration tools like Docker or Kubernetes.</li></ul> |
-| 🧩 | **Modularity**    | <ul><li>The project is modular with separate source files for whitelist and blocklist.</li><li>The main script `update-firewall-blocklists.sh` is responsible for updating the firewall blocklists, managing the IP whitelist, and ensuring secure API key file permissions.</li></ul> |
-| 🧪 | **Testing**       | <ul><li>There is no explicit testing framework or test cases provided in the codebase.</li></ul> |
-| ⚡️  | **Performance**   | <ul><li>The script downloads source data in parallel for efficiency.</li><li>The dynamic DynDNS IP whitelist allows for automatic updating of IP addresses, improving performance.</li></ul> |
-| 🛡️ | **Security**      | <ul><li>The project uses a comprehensive list of potential threats from various sources to enhance firewall security.</li><li>The script ensures secure API key file permissions.</li><li>The project uses a whitelist to allow traffic only from trusted sources, enhancing network security.</li></ul> |
-| 📦 | **Dependencies**  | <ul><li>The project has dependencies on external IP lists for whitelist and blocklist sources.</li><li>The project does not seem to have any package manager dependencies.</li></ul> |
+| ⚙️  | **Architecture**  | <ul><li>Script-based automation primarily using `<shell>` scripts.</li><li>Designed for modern network environments supporting both IPv4 and IPv6.</li><li>Operates within a security framework in `/usr/local/bin/firewall-blocklists`.</li></ul> |
+| 🔩 | **Code Quality**  | <ul><li>Emphasizes secure handling of API keys and file permissions.</li><li>Uses parallel downloading to optimize performance.</li><li>Dynamic management of DynDNS IP whitelists.</li></ul> |
+| 📄 | **Documentation** | <ul><li>Lacks comprehensive documentation in standard formats.</li><li>Code comments and script descriptions provide basic guidance.</li><li>Documentation is fragmented across various script files.</li></ul> |
+| 🔌 | **Integrations**  | <ul><li>Integrates with external sources for blocklists and whitelists.</li><li>Compatible with containerized environments, enhancing deployment flexibility.</li><li>Utilizes GeoLite2 databases for regional IP data.</li></ul> |
+| 🧩 | **Modularity**    | <ul><li>Scripts and source files are organized into functional modules like blocklists and whitelists.</li><li>Allows easy extension or modification of source lists.</li><li>Clear separation of concerns between different security functionalities.</li></ul> |
+| 🧪 | **Testing**       | <ul><li>No explicit mention of a testing framework or test scripts.</li><li>Reliability inferred through script-based operations and manual updates.</li><li>Testing likely informal and manual based on script execution.</li></ul> |
+| ⚡️  | **Performance**   | <ul><li>Parallel downloading mechanisms reduce update times.</li><li>Script efficiency optimized for frequent updates.</li><li>Designed to operate without superuser privileges, minimizing resource usage.</li></ul> |
+| 🛡️ | **Security**      | <ul><li>Focuses on robust security practices with secure API key handling.</li><li>Dynamic and real-time updates to firewall rules enhance protection.</li><li>Specific configurations to prevent unauthorized access.</li></ul> |
+| 📦 | **Dependencies**  | <ul><li>Depends on external sources for blocklists and whitelists.</li><li>Utilizes `<shell>` for script execution.</li><li>Relies on GeoLite2 for regional IP data.</li></ul> |
+| 🚀 | **Scalability**   | <ul><li>Designed to handle updates efficiently through parallel processing.</li><li>Scalable to different network sizes and configurations.</li><li>Supports a broad range of IP addresses and domain lists.</li></ul> |
+```
 
 ---
 
-##  Project Structure
+## 📁 Project Structure
 
 ```sh
 └── firewall-blocklist-updater/
@@ -73,7 +75,7 @@ The Firewall-Blocklist-Updater is a robust open-source project designed to enhan
 ```
 
 
-###  Project Index
+### 📂 Project Index
 <details open>
 	<summary><b><code>FIREWALL-BLOCKLIST-UPDATER/</code></b></summary>
 	<details> <!-- __root__ Submodule -->
@@ -82,7 +84,15 @@ The Firewall-Blocklist-Updater is a robust open-source project designed to enhan
 			<table>
 			<tr>
 				<td><b><a href='https://github.com/gbzret4d/firewall-blocklist-updater/blob/master/update-firewall-blocklists.sh'>update-firewall-blocklists.sh</a></b></td>
-				<td>- The `update-firewall-blocklists.sh` file is a script that updates the firewall blocklists in the project<br>- It supports both IPv4 and IPv6, and it downloads source data in parallel for efficiency<br>- The script also ensures secure API key file permissions and is compatible with containers, eliminating the need for sudo privileges<br>- Additionally, it manages a dynamic DynDNS IP whitelist, which allows for the automatic updating of IP addresses in the whitelist<br>- The script uses a configuration directory and two source files, one for the whitelist and one for the blocklist, to manage these lists<br>- In the context of the entire codebase, this script plays a crucial role in maintaining the security of the system by regularly updating the firewall blocklists and managing the IP whitelist<br>- It is an essential part of the project's security infrastructure.</td>
+				<td>- The `update-firewall-blocklists.sh` script is a critical component of the security infrastructure within the codebase, primarily designed to enhance the robustness of the system's firewall<br>- Its main purpose is to automate the updating process of firewall blocklists, ensuring that the system is protected against unauthorized IP addresses and potentially harmful internet domains<br>- The script supports both IPv4 and IPv6 addresses, which makes it versatile for modern network environments.
+
+Key features of the script include:
+- **Parallel downloading** of source lists, which optimizes the update process by reducing the time required to fetch new entries.
+- **Secure handling of API keys**, with specific attention to file permissions to prevent unauthorized access.
+- Compatibility with containerized environments, allowing it to run without superuser privileges, which is crucial for maintaining security best practices in container deployments.
+- **Dynamic management of DynDNS IP whitelists**, which allows for real-time updates and modifications to whitelisted IPs without manual intervention.
+
+This script operates within a larger security framework, likely interacting with other components in the `/usr/local/bin/firewall-blocklists` directory, as indicated by its configuration settings<br>- It plays a pivotal role in maintaining the integrity and security of the network by ensuring that the firewall's blocklists are continuously updated, reflecting the latest security intelligence<br>- This proactive updating mechanism is essential for protecting the system against emerging threats and maintaining compliance with security policies.</td>
 			</tr>
 			</table>
 		</blockquote>
@@ -93,19 +103,19 @@ The Firewall-Blocklist-Updater is a robust open-source project designed to enhan
 			<table>
 			<tr>
 				<td><b><a href='https://github.com/gbzret4d/firewall-blocklist-updater/blob/master/firewall-blocklists/whitelists.sources'>whitelists.sources</a></b></td>
-				<td>- Whitelists.sources within the firewall-blocklists project serves as a reference to external resources, specifically country-based IP lists<br>- It contributes to the overall architecture by providing a mechanism to whitelist certain IP addresses from Germany, Austria, and Switzerland, enhancing the project's firewall configuration capabilities.</td>
+				<td>- Whitelists.sources within the firewall-blocklists directory manages network access by specifying trusted IP ranges from Germany, Austria, and Switzerland<br>- It supports the broader security framework by ensuring these predefined networks are not inadvertently blocked, maintaining essential access and communication within these regions in the overall network security architecture.</td>
 			</tr>
 			<tr>
 				<td><b><a href='https://github.com/gbzret4d/firewall-blocklist-updater/blob/master/firewall-blocklists/blocklist.sources'>blocklist.sources</a></b></td>
-				<td>- Blocklist.sources within the firewall-blocklists directory serves as a repository of URLs, each pointing to a different source of IP addresses deemed unsafe or malicious<br>- These sources are integral to the project's security measures, providing a comprehensive list of potential threats to be blocked by the firewall.</td>
+				<td>- Maintains a centralized repository of URL sources for IP blocklists, crucial for the firewall's functionality within the codebase<br>- These sources provide updated lists of compromised, malicious, or otherwise undesirable IP addresses, enabling effective network security measures by dynamically updating firewall rules to block potentially harmful traffic.</td>
 			</tr>
 			<tr>
 				<td><b><a href='https://github.com/gbzret4d/firewall-blocklist-updater/blob/master/firewall-blocklists/whitelist.sources'>whitelist.sources</a></b></td>
-				<td>- Whitelist.sources within the firewall-blocklists directory serves as a reference list for trusted IP addresses from Germany, Austria, and Switzerland<br>- It fetches data from the FireHOL's IP lists, specifically the GeoLite2 country datasets, to establish a secure network environment by allowing traffic only from these trusted sources.</td>
+				<td>- Manages and consolidates network whitelisting for specific countries within the firewall configuration by sourcing predefined IP blocks from GeoLite2 databases for Germany, Austria, and Switzerland<br>- Essential for tailoring access controls and enhancing security measures, it supports the broader goal of maintaining a robust and region-specific network defense strategy within the project's architecture.</td>
 			</tr>
 			<tr>
 				<td><b><a href='https://github.com/gbzret4d/firewall-blocklist-updater/blob/master/firewall-blocklists/blocklists.sources'>blocklists.sources</a></b></td>
-				<td>- Blocklists.sources in the firewall-blocklists directory serves as a repository of URLs that host various IP blocklists<br>- These blocklists are integral to the project's security measures, providing a comprehensive list of potentially harmful IP addresses associated with cyber threats, compromised systems, and malicious activities<br>- This aids in enhancing the project's firewall defenses.</td>
+				<td>- Serves as a centralized repository of URLs pointing to various external IP blocklists<br>- These blocklists are integral for enhancing network security by providing regularly updated lists of IPs known for malicious activities<br>- The content aids in the dynamic configuration of firewall rules across the system, ensuring robust defense mechanisms against potential cyber threats.</td>
 			</tr>
 			</table>
 		</blockquote>
@@ -113,16 +123,16 @@ The Firewall-Blocklist-Updater is a robust open-source project designed to enhan
 </details>
 
 ---
-##  Getting Started
+## 🚀 Getting Started
 
-###  Prerequisites
+### ☑️ Prerequisites
 
 Before getting started with firewall-blocklist-updater, ensure your runtime environment meets the following requirements:
 
 - **Programming Language:** Error detecting primary_language: {'sh': 1, 'sources': 4}
 
 
-###  Installation
+### ⚙️ Installation
 
 Install firewall-blocklist-updater using one of the following methods:
 
@@ -144,16 +154,16 @@ echo 'INSERT-INSTALL-COMMAND-HERE'
 
 
 
-###  Usage
+### 🤖 Usage
 Run firewall-blocklist-updater using the following command:
 echo 'INSERT-RUN-COMMAND-HERE'
 
-###  Testing
+### 🧪 Testing
 Run the test suite using the following command:
 echo 'INSERT-TEST-COMMAND-HERE'
 
 ---
-##  Project Roadmap
+## 📌 Project Roadmap
 
 - [X] **`Task 1`**: <strike>Implement feature one.</strike>
 - [ ] **`Task 2`**: Implement feature two.
@@ -161,7 +171,7 @@ echo 'INSERT-TEST-COMMAND-HERE'
 
 ---
 
-##  Contributing
+## 🔰 Contributing
 
 - **💬 [Join the Discussions](https://github.com/gbzret4d/firewall-blocklist-updater/discussions)**: Share your insights, provide feedback, or ask questions.
 - **🐛 [Report Issues](https://github.com/gbzret4d/firewall-blocklist-updater/issues)**: Submit bugs found or log feature requests for the `firewall-blocklist-updater` project.
@@ -204,14 +214,8 @@ echo 'INSERT-TEST-COMMAND-HERE'
 
 ---
 
-##  License
+## 🎗 License
 
 This project is protected under the [SELECT-A-LICENSE](https://choosealicense.com/licenses) License. For more details, refer to the [LICENSE](https://choosealicense.com/licenses/) file.
-
----
-
-##  Acknowledgments
-
-- List any resources, contributors, inspiration, etc. here.
 
 ---
