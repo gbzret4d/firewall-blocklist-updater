@@ -298,14 +298,16 @@ filter_private_ips() {
   fi
 
   python3 <<EOF < "$infile" > "$outfile"
-import ipaddress, sys
+import ipaddress
+import sys
+
 ips = set()
 for line in sys.stdin:
     line = line.strip()
-    if not line or line.startswith("#"):
+    if not line or line.startswith('#'):
         continue
     try:
-        if "/" in line:
+        if '/' in line:
             ipobj = ipaddress.ip_network(line, strict=False)
         else:
             ipobj = ipaddress.ip_address(line)
@@ -317,6 +319,7 @@ for line in sys.stdin:
                 ips.add(str(ipobj))
     except Exception:
         pass
+
 for ip in sorted(ips):
     print(ip)
 EOF
