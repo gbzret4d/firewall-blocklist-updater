@@ -42,21 +42,20 @@ echo "[INFO] Installing/updating script to $SCRIPT_BIN ..."
 cp "$BASE_DIR/update-firewall-blocklists.sh" "$SCRIPT_BIN"
 chmod +x "$SCRIPT_BIN"
 
-# Load API keys and configuration only if not already set by environment
+# Load API keys and configuration only if not set already
 load_env_vars() {
   if [[ -f "$KEYFILE" ]]; then
     chmod 600 "$KEYFILE"
-    # Read each line and export variable only if not set already
     while IFS='=' read -r var val || [[ -n "$var" ]]; do
-      # Skip empty lines or comments
-      [[ "$var" =~ ^\s*# ]] && continue
+      # Skip empty or comment lines
+      [[ "$var" =~ ^[[:space:]]*# ]] && continue
       [[ -z "$var" ]] && continue
-      # Remove export keyword if present
+      # Remove export keyword and whitespace
       var="${var#export }"
-      # Trim spaces
       var="${var//[[:space:]]/}"
+      # Only export if variable empty/unset
       if [[ -z "${!var-}" ]]; then
-        # Remove possible quotes around value
+        # Remove wrapping quotes from val
         val="${val%\"}"
         val="${val#\"}"
         export "$var=$val"
@@ -67,7 +66,6 @@ load_env_vars() {
     echo "[WARN] Key file $KEYFILE not found. API, Telegram and DYNDNS_HOST features disabled."
   fi
 }
-
 load_env_vars
 
 # ---- Color variables and logging ----
@@ -294,7 +292,15 @@ download_honeydb() {
 }
 
 filter_private_ips() {
-  local infile="$1" outfile="$2"
+  # Filter out private, loopback, reserved and multicast IPs from input list
+  # Writes filtered results to output file
+  if [[ $# -lt 2 ]]; then
+    log WARN "filter_private_ips() called with insufficient arguments"
+    return 1
+  fi
+  local infile="$1"
+  local outfile="$2"
+
   if ! command -v python3 &>/dev/null; then
     log WARN "python3 not found; skipping private IP filtering"
     cp "$infile" "$outfile"
@@ -320,42 +326,11 @@ for line in sys.stdin:
         elif ipobj.version == 6:
             if not (ipobj.is_private or ipobj.is_loopback or ipobj.is_reserved or ipobj.is_multicast):
                 ips.add(str(ipobj))
-    except:
+    except Exception:
         pass
 for ip in sorted(ips):
     print(ip)
 EOF
-
-  log INFO "Filtered private/local IPs (IPv4+IPv6): $infile -> $outfile"
-}
-
-  python3 -c "$(cat <<EOF
-import ipaddress, sys
-ips = set()
-for line in sys.stdin:
-    line = line.strip()
-    if not line or line.startswith("#"):
-        continue
-    try:
-        ipobj = None
-        if "/" in line:
-            ipobj = ipaddress.ip_network(line, strict=False)
-        else:
-            ipobj = ipaddress.ip_address(line)
-        if ipobj.version == 4:
-            if not (ipobj.is_private or ipobj.is_loopback or ipobj.is_reserved or ipobj.is_multicast):
-                ips.add(str(ipobj))
-        elif ipobj.version == 6:
-            if not (ipobj.is_private or ipobj.is_loopback or ipobj.is_reserved or ipobj.is_multicast):
-                ips.add(str(ipobj))
-    except:
-        pass
-
-with open('${outfile}', 'w') as f:
-    for ip in sorted(ips):
-        f.write(ip + "\\n")
-EOF
-)" < "$infile"
 
   log INFO "Filtered private/local IPs (IPv4+IPv6): $infile -> $outfile"
 }
