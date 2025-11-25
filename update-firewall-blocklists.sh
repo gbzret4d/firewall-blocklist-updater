@@ -9,9 +9,9 @@ set -euo pipefail
 # - Container compatible (no sudo required)
 # - Dynamic DynDNS IP whitelist management added
 # - Auto-update script from GitHub repo (/usr/local/etc/)
-# 
-# Adjusted to treat environment variables as fully optional,
-# ensuring no script termination on missing keys.
+#
+# Enhanced to accept environment variables passed in a one-liner:
+# Variables set before script invocation override .env file values.
 #################################################
 
 # Base directories
@@ -42,17 +42,33 @@ echo "[INFO] Installing/updating script to $SCRIPT_BIN ..."
 cp "$BASE_DIR/update-firewall-blocklists.sh" "$SCRIPT_BIN"
 chmod +x "$SCRIPT_BIN"
 
-# Load API keys and configuration
-if [[ -f "$KEYFILE" ]]; then
-  chmod 600 "$KEYFILE"
-  set -a
-  # shellcheck disable=SC1090
-  source "$KEYFILE"
-  set +a
-  echo "[INFO] Loaded API keys and configuration from $KEYFILE"
-else
-  echo "[WARN] Key file $KEYFILE not found. API, Telegram and DYNDNS_HOST features disabled."
-fi
+# Load API keys and configuration only if not already set by environment
+load_env_vars() {
+  if [[ -f "$KEYFILE" ]]; then
+    chmod 600 "$KEYFILE"
+    # Read each line and export variable only if not set already
+    while IFS='=' read -r var val || [[ -n "$var" ]]; do
+      # Skip empty lines or comments
+      [[ "$var" =~ ^\s*# ]] && continue
+      [[ -z "$var" ]] && continue
+      # Remove export keyword if present
+      var="${var#export }"
+      # Trim spaces
+      var="${var//[[:space:]]/}"
+      if [[ -z "${!var-}" ]]; then
+        # Remove possible quotes around value
+        val="${val%\"}"
+        val="${val#\"}"
+        export "$var=$val"
+      fi
+    done < "$KEYFILE"
+    echo "[INFO] Loaded API keys and configuration from $KEYFILE"
+  else
+    echo "[WARN] Key file $KEYFILE not found. API, Telegram and DYNDNS_HOST features disabled."
+  fi
+}
+
+load_env_vars
 
 # ---- Color variables and logging ----
 if [[ -t 1 ]]; then
