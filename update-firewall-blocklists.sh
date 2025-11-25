@@ -9,6 +9,9 @@ set -euo pipefail
 # - Container compatible (no sudo required)
 # - Dynamic DynDNS IP whitelist management added
 # - Auto-update script from GitHub repo (/usr/local/etc/)
+# 
+# Adjusted to treat environment variables as fully optional,
+# ensuring no script termination on missing keys.
 #################################################
 
 # Base directories
@@ -42,7 +45,8 @@ chmod +x "$SCRIPT_BIN"
 # Load API keys and configuration
 if [[ -f "$KEYFILE" ]]; then
   chmod 600 "$KEYFILE"
-  export $(grep -v '^#' "$KEYFILE" | xargs) || true
+  # shellcheck disable=SC2046
+  export $(grep -Ev '^#|^$' "$KEYFILE" || true) || true
   echo "[INFO] Loaded API keys and configuration from $KEYFILE"
 else
   echo "[WARN] Key file $KEYFILE not found. API, Telegram and DYNDNS_HOST features disabled."
@@ -73,7 +77,7 @@ log() {
 send_telegram() {
   if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
     log WARN "Telegram token or chat ID missing; skipping telegram notification."
-    return
+    return 0
   fi
   local message="$1"
   curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -137,7 +141,7 @@ IPTABLES_CHAIN6="INPUT"   # Adjust if ip6tables is used
 IPSET_HASH_SIZE=2048
 IPSET_MAX_ELEM=65536
 
-ABUSEIPDB_API_KEY="${ABUSEIPDB_API_KEY:-YOUR_API_KEY_HERE}"
+ABUSEIPDB_API_KEY="${ABUSEIPDB_API_KEY:-}"
 HONEYDB_API_ID="${HONEYDB_API_ID:-}"
 HONEYDB_API_KEY="${HONEYDB_API_KEY:-}"
 HONEYDB_URL="https://honeydb.io/api/bad-hosts"
@@ -151,7 +155,7 @@ read_sources() {
   local file="$1"
   if [[ ! -f "$file" ]]; then
     log WARN "Sources file $file does not exist."
-    return 1
+    return 0
   fi
   grep -E '^\s*[^#[:space:]]' "$file" || true
 }
@@ -175,8 +179,8 @@ download_with_backup() {
     log WARN "Used backup for $url"
     return 0
   fi
-  log ERROR "No backup available for $url"
-  return 1
+  log WARN "No backup available for $url"
+  return 0
 }
 
 download_and_merge_parallel() {
@@ -205,8 +209,8 @@ download_and_merge_parallel() {
 
 download_abuseipdb() {
   local outfile="$1" bakfile="$2"
-  if [[ "$ABUSEIPDB_API_KEY" == "YOUR_API_KEY_HERE" || -z "$ABUSEIPDB_API_KEY" ]]; then
-    log WARN "AbuseIPDB API key missing or default. Skipping AbuseIPDB."
+  if [[ -z "$ABUSEIPDB_API_KEY" ]]; then
+    log WARN "AbuseIPDB API key missing or empty. Skipping AbuseIPDB."
     return 0
   fi
   log INFO "Downloading AbuseIPDB blacklist"
@@ -230,8 +234,8 @@ download_abuseipdb() {
     log WARN "Using backup for AbuseIPDB blacklist"
     return 0
   fi
-  log ERROR "No AbuseIPDB backup available"
-  return 1
+  log WARN "No AbuseIPDB backup available"
+  return 0
 }
 
 download_honeydb() {
@@ -267,8 +271,8 @@ download_honeydb() {
     log WARN "Using backup for HoneyDB blacklist"
     return 0
   fi
-  log ERROR "No HoneyDB backup available"
-  return 1
+  log WARN "No HoneyDB backup available"
+  return 0
 }
 
 filter_private_ips() {
@@ -338,7 +342,7 @@ load_ips_to_ipset() {
       ipset add "$set" "$ip" 2>/dev/null || true
       ((cnt++))
     fi
-  done < <(grep -Ev '^\s*($|#)' "$file")
+  done < <(grep -Ev '^\s*($|#)' "$file" || true)
   log INFO "Loaded $cnt IPs into $set"
 }
 
@@ -369,7 +373,7 @@ ensure_iptables_rule() {
 cleanup_old_dynamic_dns_ips() {
   if [[ -z "${DYNDNS_HOST:-}" ]]; then
     log WARN "DYNDNS_HOST not set. Skipping dynamic DNS whitelist cleanup."
-    return 1
+    return 0
   fi
   local dnsname="$DYNDNS_HOST"
   local current_ip new_ips ip
@@ -377,7 +381,7 @@ cleanup_old_dynamic_dns_ips() {
   current_ip=$(dig +short "$dnsname" | head -n1 || true)
   if [[ -z "$current_ip" ]]; then
     log WARN "Failed to resolve $dnsname; skipping cleanup of old DynDNS IPs."
-    return 1
+    return 0
   fi
 
   mapfile -t new_ips < <(ipset list "$IPSET_WHITELIST" | awk '/^Members:$/ {flag=1;next} flag && NF {print $1}' || true)
@@ -387,12 +391,13 @@ cleanup_old_dynamic_dns_ips() {
       ipset del "$IPSET_WHITELIST" "$ip" 2>/dev/null && log INFO "Removed old DynDNS IP $ip from whitelist"
     fi
   done
+  return 0
 }
 
 update_dynamic_dns_whitelist() {
   if [[ -z "${DYNDNS_HOST:-}" ]]; then
     log WARN "DYNDNS_HOST not set. Skipping dynamic DNS whitelist update."
-    return 1
+    return 0
   fi
   local dnsname="$DYNDNS_HOST"
   local ip
@@ -400,7 +405,7 @@ update_dynamic_dns_whitelist() {
 
   if [[ -z "$ip" ]]; then
     log WARN "Failed to resolve $dnsname; whitelist entry unchanged."
-    return 1
+    return 0
   fi
 
   if ipset test "$IPSET_WHITELIST" "$ip" &>/dev/null; then
@@ -410,7 +415,8 @@ update_dynamic_dns_whitelist() {
     log INFO "Added dynamic DNS IP $ip to whitelist"
   fi
 
-  cleanup_old_dynamic_dns_ips
+  cleanup_old_dynamic_dns_ips || true
+  return 0
 }
 
 # --- Main execution ---
@@ -418,13 +424,13 @@ log INFO "=== Starting firewall blocklist update ==="
 
 cleanup_old_iptables_rules
 
-update_dynamic_dns_whitelist
+update_dynamic_dns_whitelist || true
 
 wl_file="$TMPDIR/whitelist.lst"
-download_and_merge_parallel "$wl_file" "${WHITELIST_SOURCES[@]}"
+download_and_merge_parallel "$wl_file" $(read_sources "$WHITELIST_SOURCES_FILE")
 
 bl_file_raw="$TMPDIR/blocklist_raw.lst"
-download_and_merge_parallel "$bl_file_raw" "${BLOCKLIST_SOURCES[@]}"
+download_and_merge_parallel "$bl_file_raw" $(read_sources "$BLOCKLIST_SOURCES_FILE")
 
 abuseipdb_file="$TMPDIR/abuseipdb.lst"
 download_abuseipdb "$abuseipdb_file" "$BACKUPDIR/abuseipdb.bak"
