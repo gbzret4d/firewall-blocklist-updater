@@ -26,3 +26,4 @@ Thumbs.db
 
 # Ignore temporary directories
 /tmp/
+firewall-blocklist-keys.env
