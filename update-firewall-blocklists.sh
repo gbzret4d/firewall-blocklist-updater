@@ -8,26 +8,47 @@ set -euo pipefail
 # - Secure API key file permissions
 # - Container compatible (no sudo required)
 # - Dynamic DynDNS IP whitelist management added
+# - Auto-update script from GitHub repo (/usr/local/etc/)
 #################################################
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KEYFILE="${KEYFILE:-$SCRIPT_DIR/firewall-blocklist-keys.env}"
-CONFIG_DIR="${CONFIG_DIR:-/usr/local/bin/firewall-blocklists}"
-WHITELIST_SOURCES_FILE="${WHITELIST_SOURCES_FILE:-$CONFIG_DIR/whitelist.sources}"
-BLOCKLIST_SOURCES_FILE="${BLOCKLIST_SOURCES_FILE:-$CONFIG_DIR/blocklist.sources}"
+# Base directories
+BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
+CONFIG_DIR="$BASE_DIR/firewall-blocklists"
+KEYFILE="${KEYFILE:-$BASE_DIR/firewall-blocklist-keys.env}"
+SCRIPT_BIN="/usr/local/bin/update-firewall-blocklists.sh"
+REPO_URL="https://github.com/gbzret4d/firewall-blocklist-updater.git"
 
-# Ensure restrictive permissions for the key file
+# Ensure base directories exist
+mkdir -p "$BASE_DIR" "$CONFIG_DIR"
+
+# Auto-update from git repo
+if [[ ! -d "$BASE_DIR/.git" ]]; then
+  echo "[INFO] Cloning repository to $BASE_DIR ..."
+  git clone --depth=1 "$REPO_URL" "$BASE_DIR"
+else
+  echo "[INFO] Updating repository in $BASE_DIR ..."
+  (
+    cd "$BASE_DIR"
+    git fetch origin main || true
+    git reset --hard origin/main || true
+  )
+fi
+
+# Install/update script in /usr/local/bin
+echo "[INFO] Installing/updating script to $SCRIPT_BIN ..."
+cp "$BASE_DIR/update-firewall-blocklists.sh" "$SCRIPT_BIN"
+chmod +x "$SCRIPT_BIN"
+
+# Load API keys and configuration
 if [[ -f "$KEYFILE" ]]; then
   chmod 600 "$KEYFILE"
-  # Load keys and variables from env file
-  # Ignore comment lines starting with #
   export $(grep -v '^#' "$KEYFILE" | xargs) || true
   echo "[INFO] Loaded API keys and configuration from $KEYFILE"
 else
-  echo "[WARN] Key file $KEYFILE not found. API, Telegram features and DYNDNS_HOST disabled."
+  echo "[WARN] Key file $KEYFILE not found. API, Telegram and DYNDNS_HOST features disabled."
 fi
 
-# Color vars for logging
+# ---- Color variables and logging ----
 if [[ -t 1 ]]; then
   RED='\033[0;31m'
   YELLOW='\033[0;33m'
@@ -72,7 +93,7 @@ error_handler() {
 }
 trap error_handler ERR SIGINT SIGTERM
 
-# Determine package manager for dependencies (Container / Host)
+# ---- Package management ----
 install_pkg() {
   local pkg="$1"
   if command -v apk &>/dev/null; then
@@ -98,11 +119,11 @@ check_install() {
   fi
 }
 
-for cmd in curl ipset iptables python3 jq grep comm sort dig; do
+for cmd in curl git ipset iptables python3 jq grep comm sort dig; do
   check_install "$cmd"
 done
 
-# Variables
+# ---- Variables ----
 TMPDIR="${TMPDIR:-/tmp/firewall-blocklists}"
 BACKUPDIR="$TMPDIR/backup"
 mkdir -p "$TMPDIR" "$BACKUPDIR"
@@ -112,17 +133,20 @@ IPSET_BLOCKLIST="blocklist_all"
 IPSET_WHITELIST6="allowed_whitelist_v6"
 IPSET_BLOCKLIST6="blocklist_all_v6"
 IPTABLES_CHAIN="INPUT"
-IPTABLES_CHAIN6="INPUT"   # modify if you use ip6tables
+IPTABLES_CHAIN6="INPUT"   # Adjust if ip6tables is used
 IPSET_HASH_SIZE=2048
 IPSET_MAX_ELEM=65536
 
-# API Keys (defaults)
 ABUSEIPDB_API_KEY="${ABUSEIPDB_API_KEY:-YOUR_API_KEY_HERE}"
 HONEYDB_API_ID="${HONEYDB_API_ID:-}"
 HONEYDB_API_KEY="${HONEYDB_API_KEY:-}"
 HONEYDB_URL="https://honeydb.io/api/bad-hosts"
 
-# --- Read sources into arrays ---
+WHITELIST_SOURCES_FILE="${WHITELIST_SOURCES_FILE:-$CONFIG_DIR/whitelist.sources}"
+BLOCKLIST_SOURCES_FILE="${BLOCKLIST_SOURCES_FILE:-$CONFIG_DIR/blocklist.sources}"
+
+# ---- Functions ----
+
 read_sources() {
   local file="$1"
   if [[ ! -f "$file" ]]; then
@@ -132,11 +156,6 @@ read_sources() {
   grep -E '^\s*[^#[:space:]]' "$file" || true
 }
 
-mapfile -t WHITELIST_SOURCES < <(read_sources "$WHITELIST_SOURCES_FILE") || true
-mapfile -t BLOCKLIST_SOURCES < <(read_sources "$BLOCKLIST_SOURCES_FILE") || true
-
-#########################################
-# Download with backup fallback
 download_with_backup() {
   local url="$1" output="$2" backup="$3"
   log INFO "Downloading $url"
@@ -151,7 +170,6 @@ download_with_backup() {
   else
     log WARN "Failed to download $url"
   fi
-  # fallback to backup
   if [[ -s "$backup" ]]; then
     cp "$backup" "$output"
     log WARN "Used backup for $url"
@@ -161,7 +179,6 @@ download_with_backup() {
   return 1
 }
 
-# Parallel downloads (max 6 jobs)
 download_and_merge_parallel() {
   local outfile="$1"
   shift
@@ -184,11 +201,6 @@ download_and_merge_parallel() {
 
   sort -u "$TMPDIR/tmpmerge.lst" > "$outfile"
   log INFO "Merged $(wc -l < "$outfile") unique entries into $outfile"
-}
-
-download_and_merge() {
-  # fallback if no parallel available
-  download_and_merge_parallel "$@"
 }
 
 download_abuseipdb() {
@@ -259,7 +271,6 @@ download_honeydb() {
   return 1
 }
 
-# Filter IPv4 and IPv6 addresses with Python (exclude private, reserved)
 filter_private_ips() {
   local infile="$1" outfile="$2"
   if ! command -v python3 &>/dev/null; then
@@ -292,7 +303,7 @@ for line in sys.stdin:
 
 with open('${outfile}', 'w') as f:
     for ip in sorted(ips):
-        f.write(ip + "\n")
+        f.write(ip + "\\n")
 EOF
 )" < "$infile"
 
@@ -314,7 +325,6 @@ create_or_flush_ipset() {
   fi
 }
 
-# Load IPv4 or IPv6 IPs into the appropriate ipset
 load_ips_to_ipset() {
   local file="$1" set="$2"
   local cnt=0
@@ -345,7 +355,6 @@ cleanup_old_iptables_rules() {
       fi
     fi
   done
-  # Optional: similar cleanup for ip6tables if used
 }
 
 ensure_iptables_rule() {
@@ -355,12 +364,7 @@ ensure_iptables_rule() {
   else
     log INFO "iptables rule for $IPSET_BLOCKLIST already exists"
   fi
-  # Optional: add ip6tables rule if IPv6 filtering desired
 }
-
-##############################################
-# Dynamic DynDNS IP Whitelist Management (using DYNDNS_HOST from env)
-##############################################
 
 cleanup_old_dynamic_dns_ips() {
   if [[ -z "${DYNDNS_HOST:-}" ]]; then
@@ -376,8 +380,6 @@ cleanup_old_dynamic_dns_ips() {
     return 1
   fi
 
-  # List all IPs currently in whitelist ipset
-  # Filter out the current IP (keep this one)
   mapfile -t new_ips < <(ipset list "$IPSET_WHITELIST" | awk '/^Members:$/ {flag=1;next} flag && NF {print $1}' || true)
 
   for ip in "${new_ips[@]}"; do
@@ -394,7 +396,6 @@ update_dynamic_dns_whitelist() {
   fi
   local dnsname="$DYNDNS_HOST"
   local ip
-
   ip=$(dig +short "$dnsname" | head -n1 || true)
 
   if [[ -z "$ip" ]]; then
@@ -409,17 +410,15 @@ update_dynamic_dns_whitelist() {
     log INFO "Added dynamic DNS IP $ip to whitelist"
   fi
 
-  # Clean up older IPs, keep only current:
   cleanup_old_dynamic_dns_ips
 }
 
 # --- Main execution ---
-
 log INFO "=== Starting firewall blocklist update ==="
 
 cleanup_old_iptables_rules
 
-update_dynamic_dns_whitelist   # <<<< Use DYNDNS_HOST from env here
+update_dynamic_dns_whitelist
 
 wl_file="$TMPDIR/whitelist.lst"
 download_and_merge_parallel "$wl_file" "${WHITELIST_SOURCES[@]}"
@@ -438,7 +437,6 @@ cat "$honeydb_file" >> "$bl_file_raw" 2>/dev/null || true
 filter_private_ips "$bl_file_raw" "$TMPDIR/blocklist_filtered.lst"
 
 bl_file_filtered="$TMPDIR/blocklist_filtered.lst"
-
 bl_file_final="$TMPDIR/blocklist_final.lst"
 comm -23 <(sort "$bl_file_filtered") <(sort "$wl_file") > "$bl_file_final"
 
@@ -450,7 +448,6 @@ load_ips_to_ipset "$wl_file" "$IPSET_WHITELIST"
 create_or_flush_ipset "$IPSET_BLOCKLIST"
 load_ips_to_ipset "$bl_file_final" "$IPSET_BLOCKLIST"
 
-# IPv6 sets creation and loading (optional)
 create_or_flush_ipset "$IPSET_WHITELIST6"
 load_ips_to_ipset "$wl_file" "$IPSET_WHITELIST6"
 
