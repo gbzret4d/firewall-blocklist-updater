@@ -45,7 +45,6 @@ chmod +x "$SCRIPT_BIN"
 # Load API keys and configuration
 if [[ -f "$KEYFILE" ]]; then
   chmod 600 "$KEYFILE"
-  # Use set -a and source for correct variable export including quotes and spaces
   set -a
   # shellcheck disable=SC1090
   source "$KEYFILE"
@@ -79,7 +78,7 @@ log() {
 
 send_telegram() {
   if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-    log WARN "Telegram token or chat ID missing; skipping telegram notification."
+    log DEBUG "Telegram token or chat ID missing; skipping telegram notification."
     return 0
   fi
   local message="$1"
@@ -213,7 +212,7 @@ download_and_merge_parallel() {
 download_abuseipdb() {
   local outfile="$1" bakfile="$2"
   if [[ -z "$ABUSEIPDB_API_KEY" ]]; then
-    log WARN "AbuseIPDB API key missing or empty. Skipping AbuseIPDB."
+    log DEBUG "AbuseIPDB API key missing or empty; skipping AbuseIPDB."
     return 0
   fi
   log INFO "Downloading AbuseIPDB blacklist"
@@ -244,7 +243,7 @@ download_abuseipdb() {
 download_honeydb() {
   local outfile="$1" bakfile="$2"
   if [[ -z "$HONEYDB_API_ID" || -z "$HONEYDB_API_KEY" ]]; then
-    log WARN "HoneyDB API ID or KEY not set. Skipping HoneyDB."
+    log DEBUG "HoneyDB API ID or KEY not set or empty; skipping HoneyDB."
     return 0
   fi
   log INFO "Downloading HoneyDB blacklist"
@@ -375,7 +374,7 @@ ensure_iptables_rule() {
 
 cleanup_old_dynamic_dns_ips() {
   if [[ -z "${DYNDNS_HOST:-}" ]]; then
-    log WARN "DYNDNS_HOST not set. Skipping dynamic DNS whitelist cleanup."
+    log DEBUG "DYNDNS_HOST not set. Skipping dynamic DNS whitelist cleanup."
     return 0
   fi
   local dnsname="$DYNDNS_HOST"
@@ -383,7 +382,7 @@ cleanup_old_dynamic_dns_ips() {
 
   current_ip=$(dig +short "$dnsname" | head -n1 || true)
   if [[ -z "$current_ip" ]]; then
-    log WARN "Failed to resolve $dnsname; skipping cleanup of old DynDNS IPs."
+    log DEBUG "Failed to resolve $dnsname; skipping cleanup of old DynDNS IPs."
     return 0
   fi
 
@@ -399,7 +398,7 @@ cleanup_old_dynamic_dns_ips() {
 
 update_dynamic_dns_whitelist() {
   if [[ -z "${DYNDNS_HOST:-}" ]]; then
-    log WARN "DYNDNS_HOST not set. Skipping dynamic DNS whitelist update."
+    log DEBUG "DYNDNS_HOST not set. Skipping dynamic DNS whitelist update."
     return 0
   fi
   local dnsname="$DYNDNS_HOST"
@@ -407,7 +406,7 @@ update_dynamic_dns_whitelist() {
   ip=$(dig +short "$dnsname" | head -n1 || true)
 
   if [[ -z "$ip" ]]; then
-    log WARN "Failed to resolve $dnsname; whitelist entry unchanged."
+    log DEBUG "Failed to resolve $dnsname; whitelist entry unchanged."
     return 0
   fi
 
