@@ -292,16 +292,9 @@ download_honeydb() {
 }
 
 filter_private_ips() {
-  # Filter out private, loopback, reserved and multicast IPs from input list
-  # Writes filtered results to output file
-  if [[ $# -lt 2 ]]; then
-    log WARN "filter_private_ips() called with insufficient arguments"
-    return 1
-  fi
   local infile="$1"
   local outfile="$2"
-
-  if ! command -v python3 &>/dev/null; then
+  if ! command -v python3 >/dev/null; then
     log WARN "python3 not found; skipping private IP filtering"
     cp "$infile" "$outfile"
     return 0
@@ -315,7 +308,6 @@ for line in sys.stdin:
     if not line or line.startswith("#"):
         continue
     try:
-        ipobj = None
         if "/" in line:
             ipobj = ipaddress.ip_network(line, strict=False)
         else:
