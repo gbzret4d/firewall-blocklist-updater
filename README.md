@@ -3,7 +3,6 @@
 </p>
 <h1 align="center">FIREWALL-BLOCKLIST-UPDATER</h1>
 <p align="center">
-    [![Ask DeepWiki](https://devin.ai/assets/askdeepwiki.png)](https://deepwiki.com/gbzret4d/firewall-blocklist-updater)
 </p>
 <p align="center">
     <em>Securing Networks, One Update at a Time.</em>
