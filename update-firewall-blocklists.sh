@@ -19,10 +19,12 @@ BLOCKLIST_SOURCES_FILE="${BLOCKLIST_SOURCES_FILE:-$CONFIG_DIR/blocklist.sources}
 # Ensure restrictive permissions for the key file
 if [[ -f "$KEYFILE" ]]; then
   chmod 600 "$KEYFILE"
-  source "$KEYFILE"
-  echo "[INFO] Loaded API keys from $KEYFILE"
+  # Load keys and variables from env file
+  # Ignore comment lines starting with #
+  export $(grep -v '^#' "$KEYFILE" | xargs) || true
+  echo "[INFO] Loaded API keys and configuration from $KEYFILE"
 else
-  echo "[WARN] Key file $KEYFILE not found. API and Telegram features disabled."
+  echo "[WARN] Key file $KEYFILE not found. API, Telegram features and DYNDNS_HOST disabled."
 fi
 
 # Color vars for logging
@@ -63,7 +65,7 @@ error_handler() {
   if [[ $exit_code -ne 0 ]]; then
     local host
     host="$(hostname)"
-    local msg="?? Firewall blocklist update FAILED with exit code $exit_code on $host at $(date '+%Y-%m-%d %H:%M:%S')"
+    local msg="🚨 Firewall blocklist update FAILED with exit code $exit_code on $host at $(date '+%Y-%m-%d %H:%M:%S')"
     send_telegram "$msg"
   fi
   exit $exit_code
@@ -290,11 +292,11 @@ for line in sys.stdin:
 
 with open('${outfile}', 'w') as f:
     for ip in sorted(ips):
-        f.write(ip + "\\n")
+        f.write(ip + "\n")
 EOF
 )" < "$infile"
 
-  log INFO "Filtered private/local IPs (IPv4+IPv6): $infile ? $outfile"
+  log INFO "Filtered private/local IPs (IPv4+IPv6): $infile -> $outfile"
 }
 
 create_or_flush_ipset() {
@@ -357,14 +359,15 @@ ensure_iptables_rule() {
 }
 
 ##############################################
-# Dynamic DynDNS IP Whitelist Management
+# Dynamic DynDNS IP Whitelist Management (using DYNDNS_HOST from env)
 ##############################################
 
-# Remove old dynamic DNS IPs from the whitelist ipset.
-# We assume all DynDNS IPs added were recorded by this script and match.
-# This function removes IPs which are no longer current.
 cleanup_old_dynamic_dns_ips() {
-  local dnsname="bh645b654.asuscomm.com"
+  if [[ -z "${DYNDNS_HOST:-}" ]]; then
+    log WARN "DYNDNS_HOST not set. Skipping dynamic DNS whitelist cleanup."
+    return 1
+  fi
+  local dnsname="$DYNDNS_HOST"
   local current_ip new_ips ip
 
   current_ip=$(dig +short "$dnsname" | head -n1 || true)
@@ -379,15 +382,17 @@ cleanup_old_dynamic_dns_ips() {
 
   for ip in "${new_ips[@]}"; do
     if [[ "$ip" != "$current_ip" ]]; then
-      # Check if IP is associated with DynDNS host by reverse DNS or pattern (optional)
-      # Here we remove all except the allowed current IP - assumes DynDNS IPs are only these found here
       ipset del "$IPSET_WHITELIST" "$ip" 2>/dev/null && log INFO "Removed old DynDNS IP $ip from whitelist"
     fi
   done
 }
 
 update_dynamic_dns_whitelist() {
-  local dnsname="bh645b654.asuscomm.com"
+  if [[ -z "${DYNDNS_HOST:-}" ]]; then
+    log WARN "DYNDNS_HOST not set. Skipping dynamic DNS whitelist update."
+    return 1
+  fi
+  local dnsname="$DYNDNS_HOST"
   local ip
 
   ip=$(dig +short "$dnsname" | head -n1 || true)
@@ -404,7 +409,7 @@ update_dynamic_dns_whitelist() {
     log INFO "Added dynamic DNS IP $ip to whitelist"
   fi
 
-  # Optionally clean up older IPs, keep only current:
+  # Clean up older IPs, keep only current:
   cleanup_old_dynamic_dns_ips
 }
 
@@ -414,7 +419,7 @@ log INFO "=== Starting firewall blocklist update ==="
 
 cleanup_old_iptables_rules
 
-update_dynamic_dns_whitelist   # <<<< Add dynamic DNS whitelist IP update here
+update_dynamic_dns_whitelist   # <<<< Use DYNDNS_HOST from env here
 
 wl_file="$TMPDIR/whitelist.lst"
 download_and_merge_parallel "$wl_file" "${WHITELIST_SOURCES[@]}"
