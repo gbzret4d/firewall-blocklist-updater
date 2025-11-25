@@ -307,18 +307,17 @@ filter_private_ips() {
   fi
 
   # Filter script: Handles IPv4 and IPv6 private/reserved ranges
-  python3 <<EOF < "$infile" > "$outfile"
+  python3 -c '
 import ipaddress
 import sys
 
 ips = set()
 for line in sys.stdin:
     line = line.strip()
-    if not line or line.startswith('#'):
+    if not line or line.startswith("#"):
         continue
     try:
-        # Check if CIDR or single IP
-        if '/' in line:
+        if "/" in line:
             ipobj = ipaddress.ip_network(line, strict=False)
         else:
             ipobj = ipaddress.ip_address(line)
@@ -326,13 +325,13 @@ for line in sys.stdin:
         if not (ipobj.is_private or ipobj.is_loopback or ipobj.is_reserved or ipobj.is_multicast):
             ips.add(str(ipobj))
     except ValueError:
-        pass # Skip invalid IPs
+        pass
     except Exception:
         pass
 
 for ip in sorted(ips):
     print(ip)
-EOF
+' < "$infile" > "$outfile"
   log INFO "Filtered private/local IPs: $outfile"
 }
 
