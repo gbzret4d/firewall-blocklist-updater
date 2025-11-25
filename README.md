@@ -1,29 +1,28 @@
 <p align="center">
-    <img src="https://cdn-icons-png.flaticon.com/512/6295/6295417.png" align="center" width="30%">
+    <img src="https://cdn-icons-png.flaticon.com/512/6295/6295417.png" align="center" width="30%" alt="Firewall Icon">
 </p>
-<p align="center"><h1 align="center">FIREWALL-BLOCKLIST-UPDATER</h1></p>
+<h1 align="center">FIREWALL-BLOCKLIST-UPDATER</h1>
+<p align="center">
+    [![Ask DeepWiki](https://devin.ai/assets/askdeepwiki.png)](https://deepwiki.com/gbzret4d/firewall-blocklist-updater)
+</p>
 <p align="center">
     <em>Securing Networks, One Update at a Time.</em>
 </p>
-<p align="center">
-    <img src="https://img.shields.io/github/license/gbzret4d/firewall-blocklist-updater?style=default&logo=opensourceinitiative&logoColor=white&color=0080ff" alt="license">
-    <img src="https://img.shields.io/github/last-commit/gbzret4d/firewall-blocklist-updater?style=default&logo=git&logoColor=white&color=0080ff" alt="last-commit">
-    <img src="https://img.shields.io/github/languages/top/gbzret4d/firewall-blocklist-updater?style=default&color=0080ff" alt="repo-top-language">
-    <img src="https://img.shields.io/github/languages/count/gbzret4d/firewall-blocklist-updater?style=default&color=0080ff" alt="repo-language-count">
-</p>
 <br>
+
+A powerful automation tool to enhance network security by regularly fetching and applying updated IP address blocklists and whitelists to your firewall.
 
 ## 🔗 Table of Contents
 
 - [📍 Overview](#-overview)
 - [👾 Features](#-features)
 - [📁 Project Structure](#-project-structure)
-  - [📂 Project Index](#-project-index)
 - [🚀 Getting Started](#-getting-started)
-  - [☑️ Prerequisites](#-prerequisites)
-  - [⚙️ Installation](#-installation)
-  - [🤖 Usage](#-usage)
-- [🔰 Contributing](#-contributing)
+  - [☑️ Prerequisites](#️-prerequisites)
+  - [⚙️ Installation](#️-installation)
+  - [🤖 Configuration](#-configuration)
+  - [⚡ Usage](#-usage)
+- [🤝 Contributing](#-contributing)
 - [🎗 License](#-license)
 - [🙌 Acknowledgments](#-acknowledgments)
 
@@ -31,7 +30,7 @@
 
 ## 📍 Overview
 
-The **Firewall Blocklist Updater** is a powerful automation tool designed to enhance network security by regularly updating firewall blocklists and whitelists. It automates the retrieval and management of IP address lists, efficiently blocking unauthorized or malicious sources while allowing trusted addresses. Supporting both IPv4 and IPv6, it includes parallel downloading for speed, dynamic handling of DynDNS whitelists, and secure management of API keys. Ideal for system administrators aiming for continuous and reliable protection, this script can run on diverse environments including containers without requiring elevated privileges.
+The **Firewall Blocklist Updater** is a robust Bash script designed to automate the maintenance of firewall security rules. It periodically downloads IP lists from various user-defined sources, including threat intelligence feeds like AbuseIPDB and HoneyDB, and applies them as `ipset` blocklists. The tool supports both IPv4 and IPv6, efficiently processes lists through parallel downloads, and ensures trusted IPs are never blocked by maintaining a separate whitelist. It also features dynamic whitelisting for hosts with dynamic DNS and provides resilience through local backups and optional failure notifications via Telegram. It's built to run in diverse environments, including containers, without requiring root privileges for most operations.
 
 ---
 
@@ -39,20 +38,19 @@ The **Firewall Blocklist Updater** is a powerful automation tool designed to enh
 
 |      | Feature           | Summary       |
 | :--- | :---------------- | :------------ |
-| ⚙️    | **Architecture**    | <ul><li>Script-based automation using shell scripting.</li><li>Supports IPv4 and IPv6 firewall rules with ipset and iptables.</li><li>Runs smoothly in containerized and host environments.</li></ul> |
-| 🔩    | **Code Quality**    | <ul><li>Secure API key handling with strict file permissions.</li><li>Parallelized downloads optimize update speed.</li><li>Dynamic dynamic-DNS IP whitelisting with error safety.</li></ul> |
-| 🔌    | **Integrations**    | <ul><li>Integrates with multiple external blocklist and whitelist sources.</li><li>Supports AbuseIPDB and HoneyDB APIs.</li><li>Utilizes GeoLite2 IP data for regional filtering.</li></ul> |
-| ⚡️    | **Performance**     | <ul><li>Parallel downloads reduce total update times.</li><li>Efficient filtering and set management using Python and ipset.</li></ul> |
-| 🛡️    | **Security**        | <ul><li>Keeps firewall rules and IP sets updated automatically.</li><li>Prevents accidental blocking of trusted IP ranges.</li><li>Secure API key environment loading.</li></ul> |
-| 📦    | **Dependencies**    | <ul><li>curl, ipset, iptables, python3, jq, dig (with automatic installation if missing).</li></ul> |
-| 🚀    | **Scalability**     | <ul><li>Designed to support growth in IP lists and network complexity.</li><li>Modular source list files enable easy customization.</li></ul> |
+| ⚙️    | **Automation**    | <ul><li>Automates fetching and applying IP blocklists and whitelists via a single script.</li><li>Handles both IPv4 and IPv6 addresses, creating separate `ipset` tables.</li><li>Can be scheduled to run regularly via cron for continuous protection.</li></ul> |
+| ⚡️    | **Performance**     | <ul><li>Utilizes parallel downloads (`xargs -P`) to significantly speed up the fetching of source lists.</li><li>Leverages `ipset` for efficient management of large IP sets with minimal performance impact on the kernel.</li></ul> |
+| 🛡️    | **Security**        | <ul><li>Securely loads API keys from a dedicated `.env` file with restricted permissions.</li><li>Filters out private, reserved, and loopback addresses to prevent accidental network lockouts.</li><li>Maintains a whitelist to ensure trusted IPs are never blocked.</li></ul> |
+| 🔌    | **Integrations**    | <ul><li>Integrates with threat intelligence feeds like AbuseIPDB and HoneyDB (requires API keys).</li><li>Easily extensible with custom blocklist and whitelist URLs via simple text files.</li><li>Sends failure notifications to a Telegram chat for monitoring.</li></ul> |
+| 🧱    | **Resilience**      | <ul><li>Creates local backups of downloaded lists and uses them as a fallback if fetching fails.</li><li>Includes an error handler to trap exits and send alerts.</li><li>Dynamically resolves and whitelists a configured DynDNS hostname to maintain access.</li></ul> |
+| 📦    | **Compatibility**    | <ul><li>Checks for and attempts to install missing dependencies (`curl`, `ipset`, `jq`, `dig`, etc.) using common package managers.</li><li>Designed to run in standard Linux environments and container environments like Docker.</li></ul> |
 
 ---
 
 ## 📁 Project Structure
 
 ```plaintext
-firewall-blocklist-updater/
+.
 ├── LICENSE
 ├── README.md
 ├── firewall-blocklists/
@@ -61,74 +59,107 @@ firewall-blocklist-updater/
 │   ├── whitelist.sources
 │   └── whitelists.sources
 └── update-firewall-blocklists.sh
+```
 
-📂 Project Index
-<details open> <summary><b><code>firewall-blocklist-updater/</code></b></summary> <details> <summary><b>update-firewall-blocklists.sh</b></summary>
-The main shell script automates the update process for firewall blocklists and whitelists. It supports both IPv4 and IPv6, securely handles API keys, downloads and merges various source lists, and manages ipset/iptables rules dynamically, including special handling of dynamic DNS whitelists.
+-   `update-firewall-blocklists.sh`: The main executable script that orchestrates the entire update process.
+-   `firewall-blocklists/`: A directory containing the lists of URLs for IP sources.
+    -   `blocklist.sources`: A newline-separated list of URLs pointing to IP blocklists.
+    -   `whitelist.sources`: A newline-separated list of URLs pointing to IP whitelists (e.g., trusted country IP ranges).
+-   `LICENSE`: The MIT License file for the project.
 
-</details> <details> <summary><b>firewall-blocklists/</b></summary>
-blocklist.sources / blocklists.sources:
-Lists of URLs where updated IP blocklists are downloaded from.
+---
 
-whitelist.sources / whitelists.sources:
-Lists of URLs providing trusted IP ranges to exclude from blocking. Typically contain regional trusted IP ranges.
+## 🚀 Getting Started
 
-</details> </details>
-🚀 Getting Started
-☑️ Prerequisites
-A Unix-like operating system (Linux, BSD, etc.) or a compatible container environment.
-Bash shell environment.
-Installed or installable dependencies:
-curl
-ipset
-iptables
-python3
-jq
-dig or bind-utils to resolve DNS
-The script attempts to automatically install missing dependencies using your package manager if run with sufficient privileges.
+### ☑️ Prerequisites
 
-⚙️ Installation
-Clone the repository:
-BASH
-git clone https://github.com/gbzret4d/firewall-blocklist-updater.git
-cd firewall-blocklist-updater
-(Optional) Adjust source list files inside firewall-blocklists/ to your needs.
+-   A Unix-like operating system (e.g., Linux).
+-   `bash` shell.
+-   The script will attempt to auto-install the following dependencies if they are missing:
+    -   `curl`
+    -   `ipset`
+    -   `iptables`
+    -   `python3`
+    -   `jq`
+    -   `dig` (from `dnsutils` or `bind-utils`)
 
-Make the updater script executable:
+### ⚙️ Installation
 
-BASH
-chmod +x update-firewall-blocklists.sh
-🤖 Usage
-Run the script with:
+1.  Clone the repository to your local machine:
+    ```sh
+    git clone https://github.com/gbzret4d/firewall-blocklist-updater.git
+    cd firewall-blocklist-updater
+    ```
+2.  Make the update script executable:
+    ```sh
+    chmod +x update-firewall-blocklists.sh
+    ```
 
-BASH
-./update-firewall-blocklists.sh
-It will:
+### 🤖 Configuration
 
-Download blocklist and whitelist sources in parallel.
-Download additional lists from AbuseIPDB and HoneyDB if API keys are provided.
-Filter out private or reserved IPs.
-Update your system's ipsets and iptables rules.
-Dynamically add the IP resolved from a configured DynDNS hostname to your whitelist.
-Send optional Telegram notifications on failure (requires valid tokens in env file).
-⚙️ Configuration
-Place your API keys for AbuseIPDB and HoneyDB in a file named firewall-blocklist-keys.env in the script folder or specify the path in the KEYFILE environment variable.
-Customize sources by editing the .sources files inside firewall-blocklists/.
-Configure your whitelist DynDNS host inside the script variable dnsname (bh645b654.asuscomm.com by default).
-🔰 Contributing
-Contributions are welcome! Please follow these steps:
+1.  **Source Lists**: Edit the files in the `firewall-blocklists/` directory to add or remove URLs for your desired blocklists and whitelists. The script uses `blocklist.sources` and `whitelist.sources` by default.
 
-Fork the repository.
-Create a topic branch (git checkout -b feature-name).
-Commit your changes with descriptive messages.
-Push your branch and open a pull request.
-Participate in code reviews.
-For any issues, please open GitHub Issues or join the Discussions tab.
+2.  **API Keys & Notifications (Optional)**: For AbuseIPDB, HoneyDB, and Telegram integration, create a file named `firewall-blocklist-keys.env` in the same directory as the script:
+    ```env
+    # AbuseIPDB API Key (https://www.abuseipdb.com/account)
+    ABUSEIPDB_API_KEY="YOUR_KEY_HERE"
 
-🎗 License
-This project is licensed under the MIT License. See the LICENSE file for details.
+    # HoneyDB API ID and Key (https://honeydb.io/settings)
+    HONEYDB_API_ID="YOUR_ID_HERE"
+    HONEYDB_API_KEY="YOUR_KEY_HERE"
 
-🙌 Acknowledgments
-Thanks to all open source projects and data providers that make network security enhancements like this possible, including AbuseIPDB, HoneyDB, GeoLite2, and the maintainers of ipset and iptables.
+    # Telegram Bot Token and Chat ID for failure notifications
+    TELEGRAM_BOT_TOKEN="YOUR_BOT_TOKEN"
+    TELEGRAM_CHAT_ID="YOUR_CHAT_ID"
+    ```
+    The script will automatically restrict permissions for this file to `600`.
 
-Maintained by gbzret4d – Feel free to reach out or contribute!
+3.  **Dynamic DNS Whitelist**: To whitelist a dynamic IP address, edit the `dnsname` variable inside `update-firewall-blocklists.sh` to your DynDNS hostname.
+    ```sh
+    # Inside update-firewall-blocklists.sh
+    local dnsname="your.dyndns.host.com"
+    ```
+
+### ⚡ Usage
+
+Run the script manually. You may need `sudo` if the script needs to install dependencies or modify `ipset`/`iptables` rules and your user lacks permissions.
+
+```sh
+sudo ./update-firewall-blocklists.sh
+```
+
+For automated execution, set up a cron job. For example, to run the script every 6 hours:
+
+```sh
+# open crontab for editing
+crontab -e
+
+# add this line (adjust path as needed)
+0 */6 * * * /path/to/firewall-blocklist-updater/update-firewall-blocklists.sh > /var/log/firewall-updater.log 2>&1
+```
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! If you have suggestions for improvements or find a bug, please feel free to fork the repository, make your changes, and submit a pull request.
+
+1.  Fork the Project
+2.  Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
+3.  Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
+4.  Push to the Branch (`git push origin feature/AmazingFeature`)
+5.  Open a Pull Request
+
+---
+
+## 🎗 License
+
+This project is licensed under the MIT License. See the `LICENSE` file for more details.
+
+---
+
+## 🙌 Acknowledgments
+
+-   Thanks to the providers of the open-source blocklists from FireHOL, blocklist.de, and others.
+-   AbuseIPDB and HoneyDB for their threat intelligence APIs.
+-   The developers of `ipset` and `iptables`.
