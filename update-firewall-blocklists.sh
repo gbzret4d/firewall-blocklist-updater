@@ -45,6 +45,7 @@ chmod +x "$SCRIPT_BIN"
 # Load API keys and configuration
 if [[ -f "$KEYFILE" ]]; then
   chmod 600 "$KEYFILE"
+  # Use set -a and source for correct variable export including quotes and spaces
   set -a
   # shellcheck disable=SC1090
   source "$KEYFILE"
