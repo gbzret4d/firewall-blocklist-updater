@@ -45,8 +45,10 @@ chmod +x "$SCRIPT_BIN"
 # Load API keys and configuration
 if [[ -f "$KEYFILE" ]]; then
   chmod 600 "$KEYFILE"
-  # shellcheck disable=SC2046
-  export $(grep -Ev '^#|^$' "$KEYFILE" || true) || true
+  set -a
+  # shellcheck disable=SC1090
+  source "$KEYFILE"
+  set +a
   echo "[INFO] Loaded API keys and configuration from $KEYFILE"
 else
   echo "[WARN] Key file $KEYFILE not found. API, Telegram and DYNDNS_HOST features disabled."
