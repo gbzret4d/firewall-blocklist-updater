@@ -301,6 +301,34 @@ filter_private_ips() {
     return 0
   fi
 
+  python3 <<EOF < "$infile" > "$outfile"
+import ipaddress, sys
+ips = set()
+for line in sys.stdin:
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    try:
+        ipobj = None
+        if "/" in line:
+            ipobj = ipaddress.ip_network(line, strict=False)
+        else:
+            ipobj = ipaddress.ip_address(line)
+        if ipobj.version == 4:
+            if not (ipobj.is_private or ipobj.is_loopback or ipobj.is_reserved or ipobj.is_multicast):
+                ips.add(str(ipobj))
+        elif ipobj.version == 6:
+            if not (ipobj.is_private or ipobj.is_loopback or ipobj.is_reserved or ipobj.is_multicast):
+                ips.add(str(ipobj))
+    except:
+        pass
+for ip in sorted(ips):
+    print(ip)
+EOF
+
+  log INFO "Filtered private/local IPs (IPv4+IPv6): $infile -> $outfile"
+}
+
   python3 -c "$(cat <<EOF
 import ipaddress, sys
 ips = set()
