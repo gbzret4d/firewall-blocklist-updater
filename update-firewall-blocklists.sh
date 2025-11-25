@@ -50,14 +50,11 @@ load_env_vars() {
       # Skip empty or comment lines
       [[ "$var" =~ ^[[:space:]]*# ]] && continue
       [[ -z "$var" ]] && continue
-      # Remove export keyword and whitespace
-      var="${var#export }"
-      var="${var//[[:space:]]/}"
-      # Only export if variable empty/unset
-      if [[ -z "${!var-}" ]]; then
-        # Remove wrapping quotes from val
-        val="${val%\"}"
-        val="${val#\"}"
+      var="${var#export }"           # strip 'export ' keyword if present
+      var="${var//[[:space:]]/}"    # remove all whitespace from var
+      if [[ -z "${!var-}" ]]; then   # only load if unset
+        val="${val%\"}"              # strip trailing quote if any
+        val="${val#\"}"              # strip leading quote if any
         export "$var=$val"
       fi
     done < "$KEYFILE"
