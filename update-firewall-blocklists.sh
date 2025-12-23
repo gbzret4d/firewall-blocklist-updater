@@ -3,10 +3,11 @@ set -euo pipefail
 export LC_ALL=C 
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v6.7"
+SCRIPT_VERSION="v6.8"
 
 #################################################
-# Firewall Blocklist Updater (v6.7 - Final Hardened)
+# Firewall Blocklist Updater (v6.8 - Final Polish)
+# - FIX: Output Formatting (Newline Glitch)
 # - HARDENING: Stale Lock File Removal
 # - HARDENING: Input Validation for Custom Whitelists
 # - HARDENING: Zero-Byte File Protection
@@ -551,7 +552,8 @@ main() {
   if [[ $DRY_RUN -eq 1 ]]; then report="⚠️ DRY-RUN REPORT%0A$report"; fi
 
   echo "------------------------------------------------"
-  echo -e "${report//%0A/\n}"
+  # FIX: Use printf or double backslash for proper newline rendering
+  echo -e "${report//%0A/\\n}"
   echo "------------------------------------------------"
 
   if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
