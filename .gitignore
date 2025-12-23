@@ -1,0 +1,37 @@
+# generated files
+target/
+generated/
+
+# dependencies
+Dependencies.toml
+
+# config files
+Config.toml
+# the config files used for testing, Uncomment the following line if you want to commit the test config files
+#!**/tests/Config.toml
+# Ignore environment/key files with secrets
+firewall-blocklist-keys.env
+
+# Ignore temporary files
+*.swp
+*.swo
+*~
+
+# Ignore log files
+*.log
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+# Ignore temporary directories
+/tmp/
+firewall-blocklist-keys.env
+firewall-blocklist-keys.env
+firewall-blocklist-keys.env
+firewall-blocklist-keys.env
+firewall-blocklist-keys.env
+firewall-blocklist-keys.env
+*.env
+firewall-blocklist-keys.env
+*.env

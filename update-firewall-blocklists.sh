@@ -1,0 +1,442 @@
+#!/bin/bash
+set -euo pipefail
+export LC_ALL=C 
+
+# --- VERSION CONTROL ---
+SCRIPT_VERSION="v6.4"
+
+#################################################
+# Firewall Blocklist Updater (v6.4 - Statistics)
+# - FEAT: Added Stats Report (Total IPs + Change Diff)
+# - FIX: Solves "Set cannot be created" logic
+# - FEAT: Atomic Set Swapping (Zero Downtime)
+# - FEAT: Smart Auto-Update
+#################################################
+
+# --- Constants ---
+BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
+CONFIG_DIR="$BASE_DIR/firewall-blocklists"
+KEYFILE="${KEYFILE:-$BASE_DIR/firewall-blocklist-keys.env}"
+SOURCE_FILE="$CONFIG_DIR/blocklist.sources"
+SCRIPT_BIN="/usr/local/bin/update-firewall-blocklists.sh"
+REPO_RAW_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/update-firewall-blocklists.sh"
+LOCKFILE="/var/run/firewall-updater.lock"
+LOGFILE="/var/log/firewall-blocklist-updater.log"
+MAX_LOG_SIZE=$((5 * 1024 * 1024))
+TIMER_FILE="/etc/systemd/system/firewall-blocklist-updater.timer"
+
+# --- Lists ---
+RECOMMENDED_LISTS=(
+    "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
+    "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
+    "Spamhaus IPv6|https://www.spamhaus.org/drop/dropv6.txt"
+    "DShield|https://feeds.dshield.org/block.txt"
+    "Feodo Tracker|https://feodotracker.abuse.ch/downloads/ipblocklist.txt"
+    "SSLBL Abuse.ch|https://sslbl.abuse.ch/blacklist/sslipblacklist.txt"
+    "IPSum Level 3|https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt"
+    "GreenSnow|https://blocklist.greensnow.co/greensnow.txt"
+    "Blocklist.de All|https://lists.blocklist.de/lists/all.txt"
+    "EmergingThreats Block|https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt"
+    "EmergingThreats Compromised|https://rules.emergingthreats.net/blockrules/compromised-ips.txt"
+    "BinaryDefense|https://www.binarydefense.com/banlist.txt"
+    "AbuseIPDB 100%|https://github.com/borestad/blocklist-abuseipdb/raw/refs/heads/main/abuseipdb-s100-7d.ipv4"
+    "BruteForce High|https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/High"
+    "Malware Hackers|https://raw.githubusercontent.com/ShadowWhisperer/IPs/refs/heads/master/Malware/Hackers"
+    "CINS Score|https://cinsscore.com/list/ci-badguys.txt"
+    "CyberCrime|https://iplists.firehol.org/files/cybercrime.ipset"
+)
+
+# --- Logging ---
+manage_log_size() {
+    if [[ -f "$LOGFILE" ]]; then
+        local size
+        if command -v stat >/dev/null; then
+            if [[ "$OSTYPE" == "linux-gnu"* ]]; then size=$(stat -c%s "$LOGFILE"); else size=$(stat -f%z "$LOGFILE"); fi
+        else size=$(wc -c < "$LOGFILE"); fi
+        if [[ $size -gt $MAX_LOG_SIZE ]]; then
+            tail -n 2000 "$LOGFILE" > "${LOGFILE}.tmp" && mv "${LOGFILE}.tmp" "$LOGFILE"
+        fi
+    fi
+}
+log() { echo -e "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $*" | tee -a "$LOGFILE"; }
+warn() { echo -e "\033[0;33m$(date '+%Y-%m-%d %H:%M:%S') [WARN] $*\033[0m" | tee -a "$LOGFILE"; }
+
+cleanup() {
+    rm -f "$LOCKFILE" /tmp/firewall-blocklists/*.lst /tmp/firewall-blocklists/*.v4 /tmp/firewall-blocklists/*.v6 /tmp/firewall-blocklists/*.ipset 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# --- Init ---
+CURL_OPTS="-sfL --connect-timeout 20"
+if curl --help | grep -q -- "--compressed"; then CURL_OPTS="$CURL_OPTS --compressed"; fi
+HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
+mkdir -p "$BASE_DIR" "$CONFIG_DIR"
+
+check_dep() { if ! command -v "$1" &>/dev/null; then warn "Missing dependency: $1"; fi; }
+for cmd in curl ipset iptables grep sort comm unzip file dig awk tr; do check_dep "$cmd"; done
+
+# --- Env Vars ---
+WHITELIST_COUNTRIES=""; BLOCKLIST_COUNTRIES=""; DYNDNS_HOST=""
+ABUSEIPDB_API_KEY=""; HONEYDB_API_ID=""; HONEYDB_API_KEY=""
+
+load_env_vars() {
+  if [[ -f "$KEYFILE" ]]; then
+    chmod 600 "$KEYFILE"
+    while IFS='=' read -r key val || [[ -n "$key" ]]; do
+       [[ "$key" =~ ^# || -z "$key" ]] && continue
+       key="${key//export /}"; key="${key// /}"; val="${val%\"}"; val="${val#\"}"
+       [[ -n "$key" ]] && printf -v "$key" "%s" "$val"
+    done < "$KEYFILE"
+  fi
+}
+load_env_vars
+
+perform_auto_update() {
+  if [[ "${1:-}" == "--post-update" ]]; then 
+      log "[AUTO-UPDATE] Update to $SCRIPT_VERSION successful."; 
+      return 0
+  fi
+  local tmp="/tmp/update-fw.sh.new"
+  if curl $CURL_OPTS -o "$tmp" "${REPO_RAW_URL}?t=$(date +%s)" || true; then
+     if [[ -s "$tmp" ]]; then
+         local remote_ver
+         remote_ver=$(grep -oE 'SCRIPT_VERSION="v[0-9.]+"' "$tmp" | head -n1 | cut -d'"' -f2 || echo "unknown")
+         if [[ "$remote_ver" != "unknown" && "$remote_ver" != "$SCRIPT_VERSION" ]]; then
+            log "[AUTO-UPDATE] New version found ($remote_ver). Updating from $SCRIPT_VERSION..."
+            cp "$tmp" "$SCRIPT_BIN" && chmod +x "$SCRIPT_BIN"
+            rm -f "$tmp"
+            exec "$SCRIPT_BIN" "--post-update"
+         else
+            rm -f "$tmp"
+         fi
+     else rm -f "$tmp"; fi
+  fi
+}
+
+check_connectivity() {
+    if ! curl -s --head --request GET https://1.1.1.1 > /dev/null; then
+        warn "No internet connection. Skipping update."
+        exit 0
+    fi
+}
+
+# --- MENUS ---
+update_env_var() {
+    local key="$1"; local val="$2"
+    [[ ! -f "$KEYFILE" ]] && touch "$KEYFILE"
+    if grep -q "^$key=" "$KEYFILE" || true; then 
+        if grep -q "^$key=" "$KEYFILE"; then
+            sed -i "s|^$key=.*|$key=\"$val\"|" "$KEYFILE"
+        else
+            echo "$key=\"$val\"" >> "$KEYFILE"
+        fi
+    else 
+        echo "$key=\"$val\"" >> "$KEYFILE"
+    fi
+    printf -v "$key" "%s" "$val"
+}
+
+ask_user() {
+    local prompt="$1"; local var_name="$2"; local current_val="${!var_name:-}"
+    read -p "$prompt [Current: ${current_val:-None}] (Type 'none' to clear): " input
+    if [[ "$input" == "none" ]]; then
+        update_env_var "$var_name" ""
+        echo " -> Cleared."
+    elif [[ -n "$input" ]]; then
+        update_env_var "$var_name" "$input"
+    fi
+}
+
+menu_geo() {
+    echo -e "\n--- 🌍 Geo-Blocking Settings ---"
+    ask_user "Whitelist Countries (Space separated, e.g. DE AT)" "WHITELIST_COUNTRIES"
+    ask_user "Blocklist Countries (Space separated, e.g. CN RU)" "BLOCKLIST_COUNTRIES"
+}
+
+menu_keys() {
+    echo -e "\n--- 🔑 API Keys & CrowdSec ---"
+    ask_user "AbuseIPDB API Key" "ABUSEIPDB_API_KEY"
+    update_crowdsec_abuseipdb "$ABUSEIPDB_API_KEY"
+    ask_user "HoneyDB API ID" "HONEYDB_API_ID"
+    ask_user "HoneyDB API Key" "HONEYDB_API_KEY"
+    ask_user "DynDNS Hostname" "DYNDNS_HOST"
+}
+
+menu_lists() {
+    echo -e "\n--- 📋 Manage Blocklist Sources ---"
+    [[ ! -f "$SOURCE_FILE" ]] && touch "$SOURCE_FILE"
+    local current_content; current_content=$(cat "$SOURCE_FILE")
+    local new_content=""
+    echo "Select lists to ENABLE (y) or DISABLE (n/Enter):"
+    for entry in "${RECOMMENDED_LISTS[@]}"; do
+        local name="${entry%%|*}"; local url="${entry#*|}"
+        local status="[ ]"
+        if echo "$current_content" | grep -Fq "$url"; then
+            status="[\033[1;32mx\033[0m]" # Green X
+            read -p "$(echo -e "$status $name") - Keep? (Y/n): " yn
+            if [[ ! "$yn" =~ ^[Nn]$ ]]; then new_content+="$url"$'\n'; fi
+        else
+            read -p "$(echo -e "$status $name") - Enable? (y/N): " yn
+            if [[ "$yn" =~ ^[Yy]$ ]]; then new_content+="$url"$'\n'; fi
+        fi
+    done
+    echo "$new_content" > "$SOURCE_FILE"
+    echo "✅ Selection saved."
+}
+
+menu_timer() {
+    echo -e "\n--- ⏲️ Update Interval (Systemd Timer) ---"
+    if [[ ! -f "$TIMER_FILE" ]]; then echo "Error: Timer file not found."; return; fi
+    local current_timer
+    current_timer=$(grep "OnCalendar" "$TIMER_FILE" | cut -d= -f2 || echo "Unknown")
+    echo "Current Interval: $current_timer"
+    echo "Examples: 'hourly', 'daily', '*-*-* 04:00:00'"
+    read -p "New Interval (Enter to keep): " new_val
+    if [[ -n "$new_val" ]]; then
+        if command -v systemd-analyze >/dev/null; then
+             if ! systemd-analyze calendar "$new_val" >/dev/null 2>&1; then
+                 echo "❌ Invalid Systemd calendar format. Aborted."
+                 return
+             fi
+        fi
+        sed -i "s|^OnCalendar=.*|OnCalendar=$new_val|" "$TIMER_FILE"
+        systemctl daemon-reload
+        systemctl restart firewall-blocklist-updater.timer
+        echo "✅ Timer updated to: $new_val (Active)"
+    else
+        echo " -> No change."
+    fi
+}
+
+update_crowdsec_abuseipdb() {
+    local key="$1"
+    if ! command -v crowdsec >/dev/null; then return 0; fi
+    echo " -> Updating CrowdSec config..."
+    if [[ -z "$key" ]]; then
+        [[ -f /etc/crowdsec/profiles.yaml ]] && sed -i '/- abuseipdb/d' /etc/crowdsec/profiles.yaml
+    else
+        mkdir -p /etc/crowdsec/notifications
+        cat <<NOTIFY > /etc/crowdsec/notifications/abuseipdb.yaml
+type: http
+name: abuseipdb
+log_level: info
+format: |
+  {
+    "ip": "{{range . -}}{{.Source.IP}}{{end}}",
+    "categories": "18,22",
+    "comment": "Blocked by CrowdSec. Scenario: {{range . -}}{{.Scenario}}{{end}}",
+    "key": "$key"
+  }
+url: https://api.abuseipdb.com/api/v2/report
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+NOTIFY
+        if ! grep -q "abuseipdb" /etc/crowdsec/profiles.yaml 2>/dev/null; then
+             if grep -q "notifications:" /etc/crowdsec/profiles.yaml; then
+                 sed -i '/notifications:/a \ - abuseipdb' /etc/crowdsec/profiles.yaml
+             else
+                 echo "notifications:" >> /etc/crowdsec/profiles.yaml
+                 echo " - abuseipdb" >> /etc/crowdsec/profiles.yaml
+             fi
+        fi
+    fi
+    systemctl restart crowdsec
+}
+
+interactive_menu() {
+    set +e 
+    while true; do
+        clear
+        echo "==============================================="
+        echo "   Firewall Admin Menu ($SCRIPT_VERSION)       "
+        echo "==============================================="
+        echo "1) 🌍 Configure Geo-Blocking"
+        echo "2) 📋 Select Blocklists"
+        echo "3) 🔑 Configure API Keys"
+        echo "4) ⏲️ Change Update Interval"
+        echo "5) 🔄 Run Update NOW"
+        echo "0) Exit"
+        echo "-----------------------------------------------"
+        read -p "Select option: " opt
+        case $opt in
+            1) menu_geo ;;
+            2) menu_lists ;;
+            3) menu_keys ;;
+            4) menu_timer ;;
+            5) main ;;
+            0) exit 0 ;;
+            *) echo "Invalid option" ;;
+        esac
+        echo ""
+        read -p "Press Enter to return to menu..."
+    done
+    set -e
+}
+
+# --- Core Logic ---
+TMPDIR="/tmp/firewall-blocklists"; mkdir -p "$TMPDIR"
+IPSET_WL="allowed_whitelist"; IPSET_BL="blocklist_all"
+IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
+
+# Helper to count entries (terse mode for speed)
+get_set_count() {
+    ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0
+}
+
+smart_extract() {
+    local f="$1"; local m=""; command -v file >/dev/null && m=$(file --mime-type -b "$f")
+    case "$m" in
+        application/zip) unzip -p "$f" || true ;;
+        application/gzip|application/x-gzip) gunzip -c "$f" || true ;;
+        *) cat "$f" ;;
+    esac
+}
+
+download_parallel() {
+  local out="$1"; shift; local srcs=("$@")
+  : > "$TMPDIR/merge.lst"
+  [[ ${#srcs[@]} -eq 0 ]] && touch "$out" && return 0
+  export -f smart_extract
+  export TMPDIR CURL_OPTS
+  printf '%s\n' "${srcs[@]}" | xargs -P4 -I{} bash -c '
+    u="{}"; f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
+    if curl '"$CURL_OPTS"' -A "fw-updater" "$u" -o "$TMPDIR/$f"; then
+        tr -d "\r" < "$TMPDIR/$f" > "$TMPDIR/$f.clean" && mv "$TMPDIR/$f.clean" "$TMPDIR/$f"
+        smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true
+        echo "" >> "$TMPDIR/merge.lst"
+    fi'
+  sed -i 's/[#;].*//g' "$TMPDIR/merge.lst"
+  sort -u "$TMPDIR/merge.lst" > "$out"
+}
+
+extract_ips() {
+    local input="$1"; local output="$2"; local family="$3"
+    
+    if [[ "$family" == "inet" ]]; then
+        grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" > "$input.tmp" || true
+        awk -F'[./]' '{
+            valid = 1
+            for(i=1; i<=4; i++) { if($i > 255) valid = 0 }
+            if(NF > 4 && $NF > 32) valid = 0
+            if(valid) print $0
+        }' "$input.tmp" > "$output"
+        rm -f "$input.tmp"
+    else
+        grep -v "http" "$input" | \
+        grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' | \
+        grep -E '[0-9a-fA-F]' | \
+        grep -vE "^::1$" > "$output" || true
+    fi
+}
+
+load_ipset() {
+  local file="$1"; local setname="$2"; local family="$3"
+  [[ ! -s "$file" ]] && return 0
+  
+  local tmp_set="${setname}_tmp"
+  
+  # Ensure main set exists silently
+  ipset create $setname hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist 2>/dev/null || true
+
+  # Build Restore File
+  echo "destroy $tmp_set" > "$TMPDIR/rst.ipset"
+  echo "create $tmp_set hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist" >> "$TMPDIR/rst.ipset"
+  echo "flush $tmp_set" >> "$TMPDIR/rst.ipset"
+  sed "s/^/add $tmp_set /" "$file" >> "$TMPDIR/rst.ipset"
+  
+  # Atomic Swap
+  echo "swap $tmp_set $setname" >> "$TMPDIR/rst.ipset"
+  echo "destroy $tmp_set" >> "$TMPDIR/rst.ipset"
+  
+  ipset restore -! < "$TMPDIR/rst.ipset" || log "Warning: Failed to load set $setname (Maybe kernel IPv6 issue?)"
+}
+
+update_dyndns() {
+  [[ -z "$DYNDNS_HOST" ]] && return 0
+  local ip=""; 
+  if command -v dig >/dev/null; then ip=$(dig +short "$DYNDNS_HOST" | head -n1 || true); 
+  elif command -v host >/dev/null; then ip=$(host "$DYNDNS_HOST" | awk '/has address/ { print $4 }' | head -n1 || true); fi
+  if [[ -n "$ip" ]]; then
+     local t="$IPSET_WL"; [[ "$ip" =~ : ]] && t="${IPSET_WL}_v6"
+     ipset add "$t" "$ip" -exist 2>/dev/null || true
+  fi
+}
+
+main() {
+  rm -rf "$TMPDIR"
+  mkdir -p "$TMPDIR"
+
+  [[ "${1:-}" != "--post-update" && "${1:-}" != "--configure" ]] && perform_auto_update "${1:-}"
+  manage_log_size
+  log "=== Update Start $SCRIPT_VERSION ==="
+  
+  if [[ $HAS_FLOCK -eq 1 ]]; then 
+      exec 9>"$LOCKFILE"
+      if ! flock -n 9; then echo "[ERROR] Script running."; exit 1; fi
+  fi
+  
+  check_connectivity
+  
+  # --- PRE-STATS ---
+  local cnt_old_v4; cnt_old_v4=$(get_set_count "$IPSET_BL")
+  local cnt_old_v6; cnt_old_v6=$(get_set_count "${IPSET_BL}_v6")
+
+  # --- PROCESS ---
+  local wl=(); [[ -f "$CONFIG_DIR/whitelist.sources" ]] && mapfile -t wl < <(grep -vE '^\s*#' "$CONFIG_DIR/whitelist.sources" || true)
+  for c in $WHITELIST_COUNTRIES; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
+  download_parallel "$TMPDIR/wl_raw.lst" "${wl[@]}"
+
+  local bl=(); [[ -f "$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "$CONFIG_DIR/blocklist.sources" || true)
+  for c in $BLOCKLIST_COUNTRIES; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
+  download_parallel "$TMPDIR/bl_raw.lst" "${bl[@]}"
+
+  if [[ -n "${HONEYDB_API_ID:-}" && -n "${HONEYDB_API_KEY:-}" ]]; then
+      curl $CURL_OPTS -H "X-HoneyDb-ApiId: $HONEYDB_API_ID" -H "X-HoneyDb-ApiKey: $HONEYDB_API_KEY" "https://honeydb.io/api/bad-hosts" -o "$TMPDIR/h.lst"
+      cat "$TMPDIR/h.lst" >> "$TMPDIR/bl_raw.lst"
+      echo "" >> "$TMPDIR/bl_raw.lst"
+  fi
+
+  extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v4" "inet"
+  extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v6" "inet6"
+  extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
+  extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
+
+  grep -vE "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)" "$TMPDIR/bl.v4" > "$TMPDIR/bl.v4.tmp" && mv "$TMPDIR/bl.v4.tmp" "$TMPDIR/bl.v4"
+
+  sort -u "$TMPDIR/bl.v4" | comm -23 - <(sort -u "$TMPDIR/wl.v4") > "$TMPDIR/bl_final.v4"
+  sort -u "$TMPDIR/bl.v6" | comm -23 - <(sort -u "$TMPDIR/wl.v6") > "$TMPDIR/bl_final.v6"
+
+  load_ipset "$TMPDIR/wl.v4" "$IPSET_WL" "inet"
+  load_ipset "$TMPDIR/bl_final.v4" "$IPSET_BL" "inet"
+  load_ipset "$TMPDIR/wl.v6" "${IPSET_WL}_v6" "inet6"
+  load_ipset "$TMPDIR/bl_final.v6" "${IPSET_BL}_v6" "inet6"
+
+  iptables -C INPUT -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set "$IPSET_BL" src -j DROP
+  command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP; }
+  
+  update_dyndns
+
+  # --- POST-STATS ---
+  local cnt_new_v4; cnt_new_v4=$(get_set_count "$IPSET_BL")
+  local cnt_new_v6; cnt_new_v6=$(get_set_count "${IPSET_BL}_v6")
+  
+  local diff_v4=$((cnt_new_v4 - cnt_old_v4))
+  local diff_v6=$((cnt_new_v6 - cnt_old_v6))
+  local s_v4=""; [[ $diff_v4 -ge 0 ]] && s_v4="+"
+  local s_v6=""; [[ $diff_v6 -ge 0 ]] && s_v6="+"
+
+  echo "------------------------------------------------"
+  echo "📊 Update Summary ($SCRIPT_VERSION)"
+  echo "------------------------------------------------"
+  echo "IPv4 Blocked: $cnt_new_v4 ($s_v4$diff_v4)"
+  echo "IPv6 Blocked: $cnt_new_v6 ($s_v6$diff_v6)"
+  echo "------------------------------------------------"
+
+  log "=== Finished [IPv4: $cnt_new_v4 ($s_v4$diff_v4), IPv6: $cnt_new_v6 ($s_v6$diff_v6)] ==="
+}
+
+# --- ENTRY POINT ---
+[[ "${1:-}" == "--configure" || "${1:-}" == "-i" ]] && interactive_menu
+main "${1:-}"
