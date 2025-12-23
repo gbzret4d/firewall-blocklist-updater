@@ -3,14 +3,15 @@ set -euo pipefail
 export LC_ALL=C 
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v6.4"
+SCRIPT_VERSION="v6.7"
 
 #################################################
-# Firewall Blocklist Updater (v6.4 - Statistics)
-# - FEAT: Added Stats Report (Total IPs + Change Diff)
-# - FIX: Solves "Set cannot be created" logic
-# - FEAT: Atomic Set Swapping (Zero Downtime)
-# - FEAT: Smart Auto-Update
+# Firewall Blocklist Updater (v6.7 - Final Hardened)
+# - HARDENING: Stale Lock File Removal
+# - HARDENING: Input Validation for Custom Whitelists
+# - HARDENING: Zero-Byte File Protection
+# - FEAT: Smart IPv6, Self-Healing, Dry-Run
+# - FEAT: Telegram, SSH-Safety, Atomic Swap
 #################################################
 
 # --- Constants ---
@@ -18,6 +19,8 @@ BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="$BASE_DIR/firewall-blocklists"
 KEYFILE="${KEYFILE:-$BASE_DIR/firewall-blocklist-keys.env}"
 SOURCE_FILE="$CONFIG_DIR/blocklist.sources"
+CUSTOM_WL_FILE="$CONFIG_DIR/whitelist.custom"
+BACKUP_DIR="$BASE_DIR/backups"
 SCRIPT_BIN="/usr/local/bin/update-firewall-blocklists.sh"
 REPO_RAW_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/update-firewall-blocklists.sh"
 LOCKFILE="/var/run/firewall-updater.lock"
@@ -25,25 +28,19 @@ LOGFILE="/var/log/firewall-blocklist-updater.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 TIMER_FILE="/etc/systemd/system/firewall-blocklist-updater.timer"
 
-# --- Lists ---
+# --- Globals ---
+DRY_RUN=0
+IPV6_ENABLED=1
+
+# --- Lists (Fallback defaults) ---
 RECOMMENDED_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
-    "Spamhaus IPv6|https://www.spamhaus.org/drop/dropv6.txt"
     "DShield|https://feeds.dshield.org/block.txt"
     "Feodo Tracker|https://feodotracker.abuse.ch/downloads/ipblocklist.txt"
-    "SSLBL Abuse.ch|https://sslbl.abuse.ch/blacklist/sslipblacklist.txt"
-    "IPSum Level 3|https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt"
     "GreenSnow|https://blocklist.greensnow.co/greensnow.txt"
-    "Blocklist.de All|https://lists.blocklist.de/lists/all.txt"
-    "EmergingThreats Block|https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt"
-    "EmergingThreats Compromised|https://rules.emergingthreats.net/blockrules/compromised-ips.txt"
-    "BinaryDefense|https://www.binarydefense.com/banlist.txt"
     "AbuseIPDB 100%|https://github.com/borestad/blocklist-abuseipdb/raw/refs/heads/main/abuseipdb-s100-7d.ipv4"
-    "BruteForce High|https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/High"
-    "Malware Hackers|https://raw.githubusercontent.com/ShadowWhisperer/IPs/refs/heads/master/Malware/Hackers"
     "CINS Score|https://cinsscore.com/list/ci-badguys.txt"
-    "CyberCrime|https://iplists.firehol.org/files/cybercrime.ipset"
 )
 
 # --- Logging ---
@@ -60,6 +57,7 @@ manage_log_size() {
 }
 log() { echo -e "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $*" | tee -a "$LOGFILE"; }
 warn() { echo -e "\033[0;33m$(date '+%Y-%m-%d %H:%M:%S') [WARN] $*\033[0m" | tee -a "$LOGFILE"; }
+dry() { echo -e "\033[0;36m[DRY-RUN] $*\033[0m"; }
 
 cleanup() {
     rm -f "$LOCKFILE" /tmp/firewall-blocklists/*.lst /tmp/firewall-blocklists/*.v4 /tmp/firewall-blocklists/*.v6 /tmp/firewall-blocklists/*.ipset 2>/dev/null || true
@@ -67,17 +65,26 @@ cleanup() {
 trap cleanup EXIT
 
 # --- Init ---
-CURL_OPTS="-sfL --connect-timeout 20"
+CURL_OPTS="-sfL --connect-timeout 20 --retry 2"
 if curl --help | grep -q -- "--compressed"; then CURL_OPTS="$CURL_OPTS --compressed"; fi
 HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
-mkdir -p "$BASE_DIR" "$CONFIG_DIR"
+mkdir -p "$BASE_DIR" "$CONFIG_DIR" "$BACKUP_DIR"
 
 check_dep() { if ! command -v "$1" &>/dev/null; then warn "Missing dependency: $1"; fi; }
-for cmd in curl ipset iptables grep sort comm unzip file dig awk tr; do check_dep "$cmd"; done
+for cmd in curl ipset iptables grep sort comm unzip file dig awk tr ip; do check_dep "$cmd"; done
+
+# --- Smart IPv6 Check ---
+check_ipv6_stack() {
+    if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi
+    # Check for global scope address (ignoring Link-Local)
+    if ! ip -6 addr show scope global | grep -q "inet6"; then return 1; fi
+    return 0
+}
 
 # --- Env Vars ---
 WHITELIST_COUNTRIES=""; BLOCKLIST_COUNTRIES=""; DYNDNS_HOST=""
 ABUSEIPDB_API_KEY=""; HONEYDB_API_ID=""; HONEYDB_API_KEY=""
+TELEGRAM_BOT_TOKEN=""; TELEGRAM_CHAT_ID=""
 
 load_env_vars() {
   if [[ -f "$KEYFILE" ]]; then
@@ -96,6 +103,8 @@ perform_auto_update() {
       log "[AUTO-UPDATE] Update to $SCRIPT_VERSION successful."; 
       return 0
   fi
+  if [[ $DRY_RUN -eq 1 ]]; then return 0; fi
+  
   local tmp="/tmp/update-fw.sh.new"
   if curl $CURL_OPTS -o "$tmp" "${REPO_RAW_URL}?t=$(date +%s)" || true; then
      if [[ -s "$tmp" ]]; then
@@ -117,6 +126,17 @@ check_connectivity() {
     if ! curl -s --head --request GET https://1.1.1.1 > /dev/null; then
         warn "No internet connection. Skipping update."
         exit 0
+    fi
+}
+
+send_telegram() {
+    local msg="$1"
+    if [[ $DRY_RUN -eq 1 ]]; then dry "Telegram would send: $msg"; return; fi
+    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+            -d chat_id="$TELEGRAM_CHAT_ID" \
+            -d text="$msg" \
+            -d parse_mode="HTML" >/dev/null || true
     fi
 }
 
@@ -160,6 +180,19 @@ menu_keys() {
     ask_user "HoneyDB API ID" "HONEYDB_API_ID"
     ask_user "HoneyDB API Key" "HONEYDB_API_KEY"
     ask_user "DynDNS Hostname" "DYNDNS_HOST"
+}
+
+menu_telegram() {
+    echo -e "\n--- 📢 Telegram Notifications ---"
+    echo "To get these values: Create a bot with @BotFather, then get your user ID from @userinfobot."
+    ask_user "Telegram Bot Token" "TELEGRAM_BOT_TOKEN"
+    ask_user "Telegram Chat ID" "TELEGRAM_CHAT_ID"
+    load_env_vars
+    if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+        echo " -> Sending test message..."
+        send_telegram "🔔 <b>Test Message</b> from Firewall Updater on $(hostname)"
+        echo " -> Check your Telegram!"
+    fi
 }
 
 menu_lists() {
@@ -254,9 +287,10 @@ interactive_menu() {
         echo "==============================================="
         echo "1) 🌍 Configure Geo-Blocking"
         echo "2) 📋 Select Blocklists"
-        echo "3) 🔑 Configure API Keys"
-        echo "4) ⏲️ Change Update Interval"
-        echo "5) 🔄 Run Update NOW"
+        echo "3) 🔑 Configure API Keys (AbuseIPDB, HoneyDB)"
+        echo "4) 📢 Configure Telegram Notifications"
+        echo "5) ⏲️ Change Update Interval"
+        echo "6) 🔄 Run Update NOW"
         echo "0) Exit"
         echo "-----------------------------------------------"
         read -p "Select option: " opt
@@ -264,8 +298,9 @@ interactive_menu() {
             1) menu_geo ;;
             2) menu_lists ;;
             3) menu_keys ;;
-            4) menu_timer ;;
-            5) main ;;
+            4) menu_telegram ;;
+            5) menu_timer ;;
+            6) main ;;
             0) exit 0 ;;
             *) echo "Invalid option" ;;
         esac
@@ -280,7 +315,6 @@ TMPDIR="/tmp/firewall-blocklists"; mkdir -p "$TMPDIR"
 IPSET_WL="allowed_whitelist"; IPSET_BL="blocklist_all"
 IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
 
-# Helper to count entries (terse mode for speed)
 get_set_count() {
     ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0
 }
@@ -303,9 +337,11 @@ download_parallel() {
   printf '%s\n' "${srcs[@]}" | xargs -P4 -I{} bash -c '
     u="{}"; f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
     if curl '"$CURL_OPTS"' -A "fw-updater" "$u" -o "$TMPDIR/$f"; then
-        tr -d "\r" < "$TMPDIR/$f" > "$TMPDIR/$f.clean" && mv "$TMPDIR/$f.clean" "$TMPDIR/$f"
-        smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true
-        echo "" >> "$TMPDIR/merge.lst"
+        if [[ -s "$TMPDIR/$f" ]]; then
+            tr -d "\r" < "$TMPDIR/$f" > "$TMPDIR/$f.clean" && mv "$TMPDIR/$f.clean" "$TMPDIR/$f"
+            smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true
+            echo "" >> "$TMPDIR/merge.lst"
+        fi
     fi'
   sed -i 's/[#;].*//g' "$TMPDIR/merge.lst"
   sort -u "$TMPDIR/merge.lst" > "$out"
@@ -313,7 +349,8 @@ download_parallel() {
 
 extract_ips() {
     local input="$1"; local output="$2"; local family="$3"
-    
+    [[ ! -f "$input" ]] && touch "$output" && return 0
+
     if [[ "$family" == "inet" ]]; then
         grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" > "$input.tmp" || true
         awk -F'[./]' '{
@@ -324,10 +361,32 @@ extract_ips() {
         }' "$input.tmp" > "$output"
         rm -f "$input.tmp"
     else
-        grep -v "http" "$input" | \
-        grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' | \
-        grep -E '[0-9a-fA-F]' | \
-        grep -vE "^::1$" > "$output" || true
+        # Only process IPv6 if enabled
+        if [[ $IPV6_ENABLED -eq 1 ]]; then
+            grep -v "http" "$input" | \
+            grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' | \
+            grep -E '[0-9a-fA-F]' | \
+            grep -vE "^::1$" > "$output" || true
+        else
+             touch "$output"
+        fi
+    fi
+}
+
+backup_sets() {
+    local setname="$1"
+    if [[ $DRY_RUN -eq 1 ]]; then dry "Would backup set $setname"; return; fi
+    # Save current set if it exists
+    if ipset list "$setname" >/dev/null 2>&1; then
+        ipset save "$setname" > "$BACKUP_DIR/$setname.save" 2>/dev/null || true
+    fi
+}
+
+restore_backup() {
+    local setname="$1"
+    if [[ -f "$BACKUP_DIR/$setname.save" ]]; then
+        warn "Restoring backup for $setname due to failure..."
+        ipset restore -! < "$BACKUP_DIR/$setname.save" || warn "Backup restore failed!"
     fi
 }
 
@@ -335,86 +394,141 @@ load_ipset() {
   local file="$1"; local setname="$2"; local family="$3"
   [[ ! -s "$file" ]] && return 0
   
+  if [[ "$family" == "inet6" && $IPV6_ENABLED -eq 0 ]]; then return 0; fi
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+      local cnt; cnt=$(wc -l < "$file")
+      dry "Load IPSet $setname ($family): $cnt entries found. Skipping apply."
+      return 0
+  fi
+
+  backup_sets "$setname"
   local tmp_set="${setname}_tmp"
   
-  # Ensure main set exists silently
   ipset create $setname hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist 2>/dev/null || true
 
-  # Build Restore File
   echo "destroy $tmp_set" > "$TMPDIR/rst.ipset"
   echo "create $tmp_set hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist" >> "$TMPDIR/rst.ipset"
   echo "flush $tmp_set" >> "$TMPDIR/rst.ipset"
   sed "s/^/add $tmp_set /" "$file" >> "$TMPDIR/rst.ipset"
   
-  # Atomic Swap
   echo "swap $tmp_set $setname" >> "$TMPDIR/rst.ipset"
   echo "destroy $tmp_set" >> "$TMPDIR/rst.ipset"
   
-  ipset restore -! < "$TMPDIR/rst.ipset" || log "Warning: Failed to load set $setname (Maybe kernel IPv6 issue?)"
+  if ! ipset restore -! < "$TMPDIR/rst.ipset"; then
+      warn "Failed to load set $setname. Attempting rollback..."
+      restore_backup "$setname"
+  fi
 }
 
 update_dyndns() {
   [[ -z "$DYNDNS_HOST" ]] && return 0
+  if [[ $DRY_RUN -eq 1 ]]; then dry "Would update DynDNS for $DYNDNS_HOST"; return; fi
+  
   local ip=""; 
   if command -v dig >/dev/null; then ip=$(dig +short "$DYNDNS_HOST" | head -n1 || true); 
   elif command -v host >/dev/null; then ip=$(host "$DYNDNS_HOST" | awk '/has address/ { print $4 }' | head -n1 || true); fi
   if [[ -n "$ip" ]]; then
      local t="$IPSET_WL"; [[ "$ip" =~ : ]] && t="${IPSET_WL}_v6"
+     if [[ "$t" == "${IPSET_WL}_v6" && $IPV6_ENABLED -eq 0 ]]; then return; fi
      ipset add "$t" "$ip" -exist 2>/dev/null || true
   fi
 }
 
 main() {
+  if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=1; echo "⚠️ DRY-RUN MODE: No changes will be applied."; fi
+
   rm -rf "$TMPDIR"
   mkdir -p "$TMPDIR"
 
-  [[ "${1:-}" != "--post-update" && "${1:-}" != "--configure" ]] && perform_auto_update "${1:-}"
+  [[ "${1:-}" != "--post-update" && "${1:-}" != "--configure" && $DRY_RUN -eq 0 ]] && perform_auto_update "${1:-}"
   manage_log_size
   log "=== Update Start $SCRIPT_VERSION ==="
   
-  if [[ $HAS_FLOCK -eq 1 ]]; then 
+  if [[ $HAS_FLOCK -eq 1 && $DRY_RUN -eq 0 ]]; then 
+      # Hardening: Check for stale locks
+      if [[ -f "$LOCKFILE" ]]; then
+          if ! kill -0 $(fuser "$LOCKFILE" 2>/dev/null) 2>/dev/null; then
+               # Lock exists but process is dead -> remove it
+               rm -f "$LOCKFILE"
+          fi
+      fi
       exec 9>"$LOCKFILE"
       if ! flock -n 9; then echo "[ERROR] Script running."; exit 1; fi
   fi
   
   check_connectivity
   
-  # --- PRE-STATS ---
+  if check_ipv6_stack; then
+      IPV6_ENABLED=1
+  else
+      log "Smart IPv6: No global IPv6 address detected. Disabling IPv6 processing."
+      IPV6_ENABLED=0
+  fi
+  
   local cnt_old_v4; cnt_old_v4=$(get_set_count "$IPSET_BL")
   local cnt_old_v6; cnt_old_v6=$(get_set_count "${IPSET_BL}_v6")
 
-  # --- PROCESS ---
+  # --- WHITELIST PROCESSING ---
+  : > "$TMPDIR/wl_raw.lst" # Reset
   local wl=(); [[ -f "$CONFIG_DIR/whitelist.sources" ]] && mapfile -t wl < <(grep -vE '^\s*#' "$CONFIG_DIR/whitelist.sources" || true)
   for c in $WHITELIST_COUNTRIES; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
   download_parallel "$TMPDIR/wl_raw.lst" "${wl[@]}"
+  
+  if [[ -f "$CUSTOM_WL_FILE" ]]; then
+      log "Adding custom whitelist entries from $CUSTOM_WL_FILE"
+      cat "$CUSTOM_WL_FILE" >> "$TMPDIR/wl_raw.lst"
+      echo "" >> "$TMPDIR/wl_raw.lst"
+  fi
+  
+  if [[ -n "${SSH_CLIENT:-}" ]]; then
+      local ssh_ip; ssh_ip=$(echo "$SSH_CLIENT" | awk '{ print $1 }')
+      log "Safety: Whitelisting current SSH Session IP ($ssh_ip)"
+      echo "$ssh_ip" >> "$TMPDIR/wl_raw.lst"
+      echo "" >> "$TMPDIR/wl_raw.lst"
+  fi
+  
+  # Clean and Extract IPs from Whitelist first to ensure validity
+  extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v4" "inet"
+  extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v6" "inet6"
 
+  # --- BLOCKLIST PROCESSING ---
   local bl=(); [[ -f "$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "$CONFIG_DIR/blocklist.sources" || true)
   for c in $BLOCKLIST_COUNTRIES; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
   download_parallel "$TMPDIR/bl_raw.lst" "${bl[@]}"
 
   if [[ -n "${HONEYDB_API_ID:-}" && -n "${HONEYDB_API_KEY:-}" ]]; then
       curl $CURL_OPTS -H "X-HoneyDb-ApiId: $HONEYDB_API_ID" -H "X-HoneyDb-ApiKey: $HONEYDB_API_KEY" "https://honeydb.io/api/bad-hosts" -o "$TMPDIR/h.lst"
-      cat "$TMPDIR/h.lst" >> "$TMPDIR/bl_raw.lst"
-      echo "" >> "$TMPDIR/bl_raw.lst"
+      if [[ -s "$TMPDIR/h.lst" ]]; then
+          cat "$TMPDIR/h.lst" >> "$TMPDIR/bl_raw.lst"
+          echo "" >> "$TMPDIR/bl_raw.lst"
+      fi
   fi
 
-  extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v4" "inet"
-  extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v6" "inet6"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
 
+  # Exclude Private Ranges
   grep -vE "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)" "$TMPDIR/bl.v4" > "$TMPDIR/bl.v4.tmp" && mv "$TMPDIR/bl.v4.tmp" "$TMPDIR/bl.v4"
 
+  # Apply Whitelist Filter
   sort -u "$TMPDIR/bl.v4" | comm -23 - <(sort -u "$TMPDIR/wl.v4") > "$TMPDIR/bl_final.v4"
   sort -u "$TMPDIR/bl.v6" | comm -23 - <(sort -u "$TMPDIR/wl.v6") > "$TMPDIR/bl_final.v6"
 
+  # Load Sets
   load_ipset "$TMPDIR/wl.v4" "$IPSET_WL" "inet"
   load_ipset "$TMPDIR/bl_final.v4" "$IPSET_BL" "inet"
   load_ipset "$TMPDIR/wl.v6" "${IPSET_WL}_v6" "inet6"
   load_ipset "$TMPDIR/bl_final.v6" "${IPSET_BL}_v6" "inet6"
 
-  iptables -C INPUT -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set "$IPSET_BL" src -j DROP
-  command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP; }
+  if [[ $DRY_RUN -eq 0 ]]; then
+      iptables -C INPUT -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set "$IPSET_BL" src -j DROP
+      if [[ $IPV6_ENABLED -eq 1 ]]; then
+          command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP; }
+      fi
+  else
+      dry "Would insert IPTables rules now."
+  fi
   
   update_dyndns
 
@@ -422,17 +536,28 @@ main() {
   local cnt_new_v4; cnt_new_v4=$(get_set_count "$IPSET_BL")
   local cnt_new_v6; cnt_new_v6=$(get_set_count "${IPSET_BL}_v6")
   
+  if [[ $DRY_RUN -eq 1 ]]; then
+      cnt_new_v4=$(wc -l < "$TMPDIR/bl_final.v4" || echo 0)
+      cnt_new_v6=$(wc -l < "$TMPDIR/bl_final.v6" || echo 0)
+  fi
+  
   local diff_v4=$((cnt_new_v4 - cnt_old_v4))
   local diff_v6=$((cnt_new_v6 - cnt_old_v6))
   local s_v4=""; [[ $diff_v4 -ge 0 ]] && s_v4="+"
   local s_v6=""; [[ $diff_v6 -ge 0 ]] && s_v6="+"
 
+  local report="📊 Update Summary ($SCRIPT_VERSION)%0AIPv4 Blocked: $cnt_new_v4 ($s_v4$diff_v4)%0AIPv6 Blocked: $cnt_new_v6 ($s_v6$diff_v6)"
+  if [[ $IPV6_ENABLED -eq 0 ]]; then report="$report (IPv6 Disabled)"; fi
+  if [[ $DRY_RUN -eq 1 ]]; then report="⚠️ DRY-RUN REPORT%0A$report"; fi
+
   echo "------------------------------------------------"
-  echo "📊 Update Summary ($SCRIPT_VERSION)"
+  echo -e "${report//%0A/\n}"
   echo "------------------------------------------------"
-  echo "IPv4 Blocked: $cnt_new_v4 ($s_v4$diff_v4)"
-  echo "IPv6 Blocked: $cnt_new_v6 ($s_v6$diff_v6)"
-  echo "------------------------------------------------"
+
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+      report="🛡️ <b>Firewall Update: $(hostname)</b>%0A$report"
+      send_telegram "$report"
+  fi
 
   log "=== Finished [IPv4: $cnt_new_v4 ($s_v4$diff_v4), IPv6: $cnt_new_v6 ($s_v6$diff_v6)] ==="
 }
