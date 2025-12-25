@@ -4,12 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v9.1"
+SCRIPT_VERSION="v9.3"
 
 #################################################
-# Firewall Blocklist Updater (v9.1 - Ipset Fix)
-# - FIX: Ensures IPSet ALWAYS exists (prevents iptables crash)
-# - FIX: Safe YAML appending
+# Firewall Blocklist Updater (v9.3 - Reliable)
+# - FIX: Replaced parallel download with sequential loop
+#        (Fixes quoting bug that caused 0 IPs)
+# - FIX: Explicit Curl options per call
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -78,8 +79,8 @@ dry() { echo -e "\033[0;36m[DRY-RUN] $*\033[0m"; }
 cleanup() { rm -f "$LOCKFILE" /tmp/firewall-blocklists/* 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
-CURL_OPTS="-sfL --connect-timeout 20 --retry 2 -A 'Mozilla/5.0 (X11; Linux x86_64)'"
-if curl --help | grep -q -- "--compressed"; then CURL_OPTS="$CURL_OPTS --compressed"; fi
+# Removed explicit CURL_OPTS variable to prevent subshell quoting issues
+USER_AGENT='Mozilla/5.0 (X11; Linux x86_64)'
 
 HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
 mkdir -p "$BASE_DIR" "$CONFIG_DIR" "$BACKUP_DIR" /tmp/firewall-blocklists
@@ -106,7 +107,7 @@ perform_auto_update() {
   if [[ "${1:-}" == "--post-update" ]]; then log "[AUTO-UPDATE] Update to $SCRIPT_VERSION successful."; return 0; fi
   if [[ $DRY_RUN -eq 1 ]]; then return 0; fi
   local tmp="/tmp/update-fw.sh.new"
-  if curl -sfL -o "$tmp" "${REPO_RAW_URL}?t=$(date +%s)" || true; then
+  if curl -sfL -A "$USER_AGENT" -o "$tmp" "${REPO_RAW_URL}?t=$(date +%s)" || true; then
      if [[ -s "$tmp" ]]; then
          local remote_ver=$(grep -oE 'SCRIPT_VERSION="v[0-9.]+"' "$tmp" | head -n1 | cut -d'"' -f2 || echo "unknown")
          if [[ "$remote_ver" != "unknown" && "$remote_ver" != "$SCRIPT_VERSION" ]]; then
@@ -240,21 +241,30 @@ smart_extract() {
     esac
 }
 
-download_parallel() {
+# --- REPLACED: SEQUENTIAL DOWNLOAD (Fixes 0 IP issue) ---
+download_lists() {
   local out="$1"; shift; local srcs=("$@")
   : > "$TMPDIR/merge.lst"
   [[ ${#srcs[@]} -eq 0 ]] && touch "$out" && return 0
-  export -f smart_extract; export TMPDIR CURL_OPTS
-  printf '%s\n' "${srcs[@]}" | xargs -P4 -I{} bash -c '
-    u="{}"; f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
-    if curl '"$CURL_OPTS"' "$u" -o "$TMPDIR/$f" || true; then
-        if [[ -s "$TMPDIR/$f" ]]; then
-            if ! head -n 1 "$TMPDIR/$f" | grep -qiE "<!DOCTYPE|<html"; then
-                tr -d "\r" < "$TMPDIR/$f" | smart_extract - >> "$TMPDIR/merge.lst" || true
-                echo "" >> "$TMPDIR/merge.lst"
-            fi
-        fi
-    fi'
+  export -f smart_extract; export TMPDIR
+
+  # Sequential loop to avoid subshell quoting issues
+  for u in "${srcs[@]}"; do
+      local f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
+      # Visual feedback for user
+      if [[ $DRY_RUN -eq 0 ]]; then echo -n "."; fi 
+      
+      if curl -sfL --connect-timeout 10 --retry 1 -A "$USER_AGENT" "$u" -o "$TMPDIR/$f" || true; then
+          if [[ -s "$TMPDIR/$f" ]]; then
+              if ! head -n 1 "$TMPDIR/$f" | grep -qiE "<!DOCTYPE|<html"; then
+                  tr -d "\r" < "$TMPDIR/$f" | smart_extract - >> "$TMPDIR/merge.lst" || true
+                  echo "" >> "$TMPDIR/merge.lst"
+              fi
+          fi
+      fi
+  done
+  if [[ $DRY_RUN -eq 0 ]]; then echo ""; fi # Newline
+
   sed -i 's/[#;].*//g' "$TMPDIR/merge.lst"
   sort -u "$TMPDIR/merge.lst" > "$out"
 }
@@ -273,12 +283,10 @@ extract_ips() {
 
 load_ipset() {
   local file="$1"; local setname="$2"; local family="$3"
-  # FIX: Always create set to satisfy iptables, even if file is empty
   if [[ "$family" == "inet6" && $IPV6_ENABLED -eq 0 ]]; then return 0; fi
   ipset create $setname hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist 2>/dev/null || true
   
   if [[ ! -s "$file" ]]; then
-      # If empty file, flush set to ensure it's empty
       ipset flush $setname 2>/dev/null || true
       return 0
   fi
@@ -323,14 +331,17 @@ main() {
   : > "$TMPDIR/wl_raw.lst"
   local wl=(); [[ -f "$CONFIG_DIR/whitelist.sources" ]] && mapfile -t wl < <(grep -vE '^\s*#' "$CONFIG_DIR/whitelist.sources" || true)
   for c in $WHITELIST_COUNTRIES; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
-  download_parallel "$TMPDIR/wl_raw.lst" "${wl[@]}"
+  download_lists "$TMPDIR/wl_raw.lst" "${wl[@]}"
   [[ -f "$CUSTOM_WL_FILE" ]] && cat "$CUSTOM_WL_FILE" >> "$TMPDIR/wl_raw.lst"
   extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v4" "inet"
   extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v6" "inet6"
 
   local bl=(); [[ -f "$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "$CONFIG_DIR/blocklist.sources" || true)
   for c in $BLOCKLIST_COUNTRIES; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
-  download_parallel "$TMPDIR/bl_raw.lst" "${bl[@]}"
+  
+  # --- USING SEQUENTIAL DOWNLOAD ---
+  download_lists "$TMPDIR/bl_raw.lst" "${bl[@]}"
+  
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
 
