@@ -4,13 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v7.7"
+SCRIPT_VERSION="v8.0"
 
 #################################################
-# Firewall Blocklist Updater (v7.7 - Config Safe Mode)
-# - FIX: Disable 'nounset' check during config loading
-#        (Prevents crash if keys.env has undefined vars)
-# - CORE: Native Sourcing, Browser UA, Input Sanitize
+# Firewall Blocklist Updater (v8.0 - Clean Stable)
+# - REMOVED: HoneyDB (Deprecated/Unstable)
+# - CORE: Safe Config Loading (Ignores old HoneyDB keys)
+# - CORE: Browser User-Agent (Fixes GreenSnow blocking)
 # - FEAT: Full Sensor Suite (Endlessh + CrowdSec)
 #################################################
 
@@ -66,6 +66,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Init ---
+# Mimic a real browser to prevent 403 Forbidden
 CURL_OPTS="-sfL --connect-timeout 20 --retry 2 -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'"
 if curl --help | grep -q -- "--compressed"; then CURL_OPTS="$CURL_OPTS --compressed"; fi
 
@@ -81,13 +82,11 @@ check_ipv6_stack() {
     return 0
 }
 
-# --- Env Vars & Loading ---
+# --- Env Vars & Safe Loading ---
 WHITELIST_COUNTRIES=""
 BLOCKLIST_COUNTRIES=""
 DYNDNS_HOST=""
 ABUSEIPDB_API_KEY=""
-HONEYDB_API_ID=""
-HONEYDB_API_KEY=""
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
 
@@ -96,16 +95,22 @@ load_env_vars() {
     # Fix Windows line endings
     if command -v dos2unix >/dev/null; then dos2unix -q "$KEYFILE"; else tr -d '\r' < "$KEYFILE" > "${KEYFILE}.tmp" && mv "${KEYFILE}.tmp" "$KEYFILE"; fi
     
-    # CRITICAL FIX: Temporarily disable 'nounset' (-u) while sourcing external file
-    # This prevents the script from crashing if the config file has undefined variables
-    set +u
-    set -a
-    # shellcheck source=/dev/null
-    source "$KEYFILE"
-    set +a
-    set -u  # Re-enable strict mode
+    # SAFE PARSER: Read line by line, ignore shell logic
+    while IFS='=' read -r key val || [[ -n "$key" ]]; do
+        [[ "$key" =~ ^# || -z "$key" ]] && continue
+        [[ "$key" =~ ^(if|then|else|fi|case|esac|for|do|done|function) ]] && continue
+        
+        val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
+        
+        # Explicit Whitelist of allowed vars (HoneyDB removed here)
+        case "$key" in
+            WHITELIST_COUNTRIES|BLOCKLIST_COUNTRIES|DYNDNS_HOST|ABUSEIPDB_API_KEY|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID)
+                printf -v "$key" "%s" "$val"
+                ;;
+        esac
+    done < "$KEYFILE"
     
-    # Sanitize inputs
+    # Sanitize Countries
     WHITELIST_COUNTRIES=$(echo "${WHITELIST_COUNTRIES:-}" | tr -cd 'A-Za-z ')
     BLOCKLIST_COUNTRIES=$(echo "${BLOCKLIST_COUNTRIES:-}" | tr -cd 'A-Za-z ')
   fi
@@ -115,7 +120,6 @@ load_env_vars
 perform_auto_update() {
   if [[ "${1:-}" == "--post-update" ]]; then log "[AUTO-UPDATE] Update to $SCRIPT_VERSION successful."; return 0; fi
   if [[ $DRY_RUN -eq 1 ]]; then return 0; fi
-  
   local tmp="/tmp/update-fw.sh.new"
   if curl -sfL -o "$tmp" "${REPO_RAW_URL}?t=$(date +%s)" || true; then
      if [[ -s "$tmp" ]]; then
@@ -239,8 +243,6 @@ menu_keys() {
     echo -e "\n--- 🔑 API Keys & CrowdSec ---"
     ask_user "AbuseIPDB API Key" "ABUSEIPDB_API_KEY"
     update_crowdsec_abuseipdb "$ABUSEIPDB_API_KEY"
-    ask_user "HoneyDB API ID" "HONEYDB_API_ID"
-    ask_user "HoneyDB API Key" "HONEYDB_API_KEY"
     ask_user "DynDNS Hostname" "DYNDNS_HOST"
 }
 
@@ -369,13 +371,20 @@ download_parallel() {
   [[ ${#srcs[@]} -eq 0 ]] && touch "$out" && return 0
   export -f smart_extract
   export TMPDIR CURL_OPTS
+  
   printf '%s\n' "${srcs[@]}" | xargs -P4 -I{} bash -c '
     u="{}"; f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
     if curl '"$CURL_OPTS"' "$u" -o "$TMPDIR/$f" || true; then
         if [[ -s "$TMPDIR/$f" ]]; then
-            tr -d "\r" < "$TMPDIR/$f" > "$TMPDIR/$f.clean" && mv "$TMPDIR/$f.clean" "$TMPDIR/$f"
-            smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true
-            echo "" >> "$TMPDIR/merge.lst"
+            # New HTML Check
+            if head -n 1 "$TMPDIR/$f" | grep -qiE "<!DOCTYPE|<html"; then
+                echo "[WARNING] Download dropped (HTML detected): $u" >&2
+                rm "$TMPDIR/$f"
+            else
+                tr -d "\r" < "$TMPDIR/$f" > "$TMPDIR/$f.clean" && mv "$TMPDIR/$f.clean" "$TMPDIR/$f"
+                smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true
+                echo "" >> "$TMPDIR/merge.lst"
+            fi
         else
             echo "[WARNING] Download empty or failed for: $u" >&2
         fi
@@ -479,7 +488,13 @@ main() {
   log "Processing Whitelists..."
   : > "$TMPDIR/wl_raw.lst"
   local wl=(); [[ -f "$CONFIG_DIR/whitelist.sources" ]] && mapfile -t wl < <(grep -vE '^\s*#' "$CONFIG_DIR/whitelist.sources" || true)
-  for c in $WHITELIST_COUNTRIES; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
+  
+  # STRICT VALIDATION: Ensure c is only 2 letters
+  for c in $WHITELIST_COUNTRIES; do 
+      if [[ "$c" =~ ^[a-zA-Z]{2}$ ]]; then
+          wl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset")
+      fi
+  done
   download_parallel "$TMPDIR/wl_raw.lst" "${wl[@]}"
   
   [[ -f "$CUSTOM_WL_FILE" ]] && cat "$CUSTOM_WL_FILE" >> "$TMPDIR/wl_raw.lst"
@@ -489,15 +504,15 @@ main() {
 
   log "Processing Blocklists..."
   local bl=(); [[ -f "$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "$CONFIG_DIR/blocklist.sources" || true)
-  for c in $BLOCKLIST_COUNTRIES; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
+  
+  for c in $BLOCKLIST_COUNTRIES; do 
+      if [[ "$c" =~ ^[a-zA-Z]{2}$ ]]; then
+          bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset")
+      fi
+  done
   download_parallel "$TMPDIR/bl_raw.lst" "${bl[@]}"
 
-  if [[ -n "${HONEYDB_API_ID:-}" && -n "${HONEYDB_API_KEY:-}" ]]; then
-      log "Fetching HoneyDB Lists..."
-      if curl $CURL_OPTS -H "X-HoneyDb-ApiId: $HONEYDB_API_ID" -H "X-HoneyDb-ApiKey: $HONEYDB_API_KEY" "https://honeydb.io/api/bad-hosts" -o "$TMPDIR/h.lst" || true; then
-          [[ -s "$TMPDIR/h.lst" ]] && cat "$TMPDIR/h.lst" >> "$TMPDIR/bl_raw.lst" || warn "HoneyDB returned empty data."
-      else warn "HoneyDB fetch failed."; fi
-  fi
+  # HoneyDB REMOVED
 
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
