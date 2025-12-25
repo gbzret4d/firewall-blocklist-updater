@@ -4,14 +4,14 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v7.6"
+SCRIPT_VERSION="v7.7"
 
 #################################################
-# Firewall Blocklist Updater (v7.6 - Bugfix Release)
-# - FIX: Native Config Loading (Fixes 'country_[' errors)
-# - FIX: Browser User-Agent (Fixes GreenSnow blocking)
-# - FIX: Input Sanitization (Removes garbage chars)
-# - CORE: All Sensors & Features included
+# Firewall Blocklist Updater (v7.7 - Config Safe Mode)
+# - FIX: Disable 'nounset' check during config loading
+#        (Prevents crash if keys.env has undefined vars)
+# - CORE: Native Sourcing, Browser UA, Input Sanitize
+# - FEAT: Full Sensor Suite (Endlessh + CrowdSec)
 #################################################
 
 # --- Constants ---
@@ -66,7 +66,6 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Init ---
-# Mimic a real browser to prevent 403 Forbidden on some lists
 CURL_OPTS="-sfL --connect-timeout 20 --retry 2 -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'"
 if curl --help | grep -q -- "--compressed"; then CURL_OPTS="$CURL_OPTS --compressed"; fi
 
@@ -94,16 +93,19 @@ TELEGRAM_CHAT_ID=""
 
 load_env_vars() {
   if [[ -f "$KEYFILE" ]]; then
-    # Fix Windows line endings causing syntax errors
+    # Fix Windows line endings
     if command -v dos2unix >/dev/null; then dos2unix -q "$KEYFILE"; else tr -d '\r' < "$KEYFILE" > "${KEYFILE}.tmp" && mv "${KEYFILE}.tmp" "$KEYFILE"; fi
     
-    # Use native sourcing - fixes the "country_[" parsing errors
+    # CRITICAL FIX: Temporarily disable 'nounset' (-u) while sourcing external file
+    # This prevents the script from crashing if the config file has undefined variables
+    set +u
     set -a
     # shellcheck source=/dev/null
     source "$KEYFILE"
     set +a
+    set -u  # Re-enable strict mode
     
-    # Sanitize inputs (Keep only letters and spaces)
+    # Sanitize inputs
     WHITELIST_COUNTRIES=$(echo "${WHITELIST_COUNTRIES:-}" | tr -cd 'A-Za-z ')
     BLOCKLIST_COUNTRIES=$(echo "${BLOCKLIST_COUNTRIES:-}" | tr -cd 'A-Za-z ')
   fi
@@ -367,7 +369,6 @@ download_parallel() {
   [[ ${#srcs[@]} -eq 0 ]] && touch "$out" && return 0
   export -f smart_extract
   export TMPDIR CURL_OPTS
-  
   printf '%s\n' "${srcs[@]}" | xargs -P4 -I{} bash -c '
     u="{}"; f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
     if curl '"$CURL_OPTS"' "$u" -o "$TMPDIR/$f" || true; then
