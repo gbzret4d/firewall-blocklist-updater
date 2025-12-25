@@ -4,12 +4,12 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v9.6"
+SCRIPT_VERSION="v9.7"
 
 #################################################
-# Firewall Blocklist Updater (v9.6 - Syntax Fix)
-# - FIX: Filters out '::' and '0.0.0.0' to prevent IPSet syntax errors
-# - FIX: Robust extraction logic (no file mime check)
+# Firewall Blocklist Updater (v9.7 - Fault Tolerant)
+# - FIX: Aggressive filtering of '::' IPv6 addresses
+# - FIX: 'ipset restore' failure no longer crashes the script
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -229,16 +229,10 @@ IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
 
 get_set_count() { ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
 
-# --- EXTRACTION SAFEGUARD ---
+# --- EXTRACTION ---
 smart_extract() {
     local f="$1"
-    if gzip -t "$f" 2>/dev/null; then
-        zcat "$f"
-    elif unzip -t "$f" 2>/dev/null; then
-        unzip -p "$f"
-    else
-        cat "$f"
-    fi
+    if gzip -t "$f" 2>/dev/null; then zcat "$f"; elif unzip -t "$f" 2>/dev/null; then unzip -p "$f"; else cat "$f"; fi
 }
 
 download_lists() {
@@ -273,12 +267,11 @@ extract_ips() {
     local input="$1"; local output="$2"; local family="$3"
     [[ ! -f "$input" ]] && touch "$output" && return 0
     if [[ "$family" == "inet" ]]; then
-        # FIX v9.6: Filter 0.0.0.0 (Invalid for ipset hash:net)
         grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" | awk -F'[./]' '{valid=1; for(i=1;i<=4;i++)if($i>255)valid=0; if(NF>4&&$NF>32)valid=0; if(valid)print $0}' | grep -vE "^0\.0\.0\.0$" > "$output" || true
     else
         if [[ $IPV6_ENABLED -eq 1 ]]; then
-            # FIX v9.6: Filter :: (Unspecified address) causing "cannot parse ::" error
-            grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$input" | grep -vE "^::1$|^::$" > "$output" || true
+            # FIX v9.7: Aggressively filter anything starting with '::' (including ::/0)
+            grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$input" | grep -vE "^::" > "$output" || true
         else touch "$output"; fi
     fi
 }
@@ -294,7 +287,12 @@ load_ipset() {
   fi
   
   ipset flush "${setname}_tmp" 2>/dev/null || ipset create "${setname}_tmp" hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist
-  sed "s/^/add ${setname}_tmp /" "$file" | ipset restore -!
+  
+  # FIX v9.7: Allow ipset restore to fail on individual lines without crashing script
+  if ! sed "s/^/add ${setname}_tmp /" "$file" | ipset restore -! 2>/dev/null; then
+      warn "Some IPs in $file were invalid and skipped by ipset (non-fatal)."
+  fi
+  
   ipset swap "${setname}_tmp" "$setname"
   ipset destroy "${setname}_tmp" 2>/dev/null || true
 }
