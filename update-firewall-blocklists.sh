@@ -1,17 +1,19 @@
 #!/bin/bash
 set -euo pipefail
-export LC_ALL=C 
+export LC_ALL=C
+# Ensure system binaries are found even in restricted cron/systemd environments
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v7.0"
+SCRIPT_VERSION="v7.3"
 
 #################################################
-# Firewall Blocklist Updater (v7.0 - Architect)
-# - FEAT: Port Conflict Detection (Safety Check)
-# - FEAT: Intelligent Sensor Status & Setup
-# - HARDENING: Stale Lock Removal & Input Valid.
-# - CORE: Smart IPv6, Self-Healing, Dry-Run
-# - OPS: Telegram, SSH-Safety, Atomic Swap
+# Firewall Blocklist Updater (v7.3 - Release Candidate)
+# - FIX: Explicit PATH definition for Cron/Systemd
+# - FIX: Added native DNS fallback (getent)
+# - FEAT: Extended OS Support (dnf, zypper)
+# - HARDENING: Full Dependency Check (xargs, sed)
+# - CORE: Endlessh, CrowdSec, IPSet, Self-Healing
 #################################################
 
 # --- Constants ---
@@ -48,51 +50,100 @@ manage_log_size() {
     if [[ -f "$LOGFILE" ]]; then
         local size
         if command -v stat >/dev/null; then
-            if [[ "$OSTYPE" == "linux-gnu"* ]]; then size=$(stat -c%s "$LOGFILE"); else size=$(stat -f%z "$LOGFILE"); fi
-        else size=$(wc -c < "$LOGFILE"); fi
+            if [[ "$OSTYPE" == "linux-gnu"* ]]; then 
+                size=$(stat -c%s "$LOGFILE")
+            else 
+                size=$(stat -f%z "$LOGFILE")
+            fi
+        else 
+            size=$(wc -c < "$LOGFILE")
+        fi
+        
         if [[ $size -gt $MAX_LOG_SIZE ]]; then
             tail -n 2000 "$LOGFILE" > "${LOGFILE}.tmp" && mv "${LOGFILE}.tmp" "$LOGFILE"
         fi
     fi
 }
-log() { echo -e "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $*" | tee -a "$LOGFILE"; }
-warn() { echo -e "\033[0;33m$(date '+%Y-%m-%d %H:%M:%S') [WARN] $*\033[0m" | tee -a "$LOGFILE"; }
-dry() { echo -e "\033[0;36m[DRY-RUN] $*\033[0m"; }
+
+log() { 
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $*" | tee -a "$LOGFILE"
+}
+
+warn() { 
+    echo -e "\033[0;33m$(date '+%Y-%m-%d %H:%M:%S') [WARN] $*\033[0m" | tee -a "$LOGFILE"
+}
+
+dry() { 
+    echo -e "\033[0;36m[DRY-RUN] $*\033[0m"
+}
 
 cleanup() {
-    rm -f "$LOCKFILE" /tmp/firewall-blocklists/*.lst /tmp/firewall-blocklists/*.v4 /tmp/firewall-blocklists/*.v6 /tmp/firewall-blocklists/*.ipset 2>/dev/null || true
+    rm -f "$LOCKFILE" 
+    rm -f /tmp/firewall-blocklists/*.lst 
+    rm -f /tmp/firewall-blocklists/*.v4 
+    rm -f /tmp/firewall-blocklists/*.v6 
+    rm -f /tmp/firewall-blocklists/*.ipset 
 }
-trap cleanup EXIT
+# Catch Exit and Interrupts for clean shutdown
+trap cleanup EXIT INT TERM
 
 # --- Init ---
 CURL_OPTS="-sfL --connect-timeout 20 --retry 2"
-if curl --help | grep -q -- "--compressed"; then CURL_OPTS="$CURL_OPTS --compressed"; fi
-HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
+if curl --help | grep -q -- "--compressed"; then 
+    CURL_OPTS="$CURL_OPTS --compressed"
+fi
+
+HAS_FLOCK=0
+if command -v flock >/dev/null; then 
+    HAS_FLOCK=1
+fi
+
 mkdir -p "$BASE_DIR" "$CONFIG_DIR" "$BACKUP_DIR"
 
-check_dep() { if ! command -v "$1" &>/dev/null; then warn "Missing dependency: $1"; fi; }
-# Added 'ss' for port check
-for cmd in curl ipset iptables grep sort comm unzip file dig awk tr ip ss; do check_dep "$cmd"; done
+check_dep() { 
+    if ! command -v "$1" &>/dev/null; then 
+        warn "Missing dependency: $1"
+    fi
+}
+
+# Added xargs and sed to dependency check
+for cmd in curl ipset iptables grep sort comm unzip file awk tr ip ss sed xargs; do 
+    check_dep "$cmd"
+done
 
 # --- Smart IPv6 Check ---
 check_ipv6_stack() {
-    if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi
-    if ! ip -6 addr show scope global | grep -q "inet6"; then return 1; fi
+    if [[ ! -f /proc/net/if_inet6 ]]; then 
+        return 1
+    fi
+    if ! ip -6 addr show scope global | grep -q "inet6"; then 
+        return 1
+    fi
     return 0
 }
 
 # --- Env Vars ---
-WHITELIST_COUNTRIES=""; BLOCKLIST_COUNTRIES=""; DYNDNS_HOST=""
-ABUSEIPDB_API_KEY=""; HONEYDB_API_ID=""; HONEYDB_API_KEY=""
-TELEGRAM_BOT_TOKEN=""; TELEGRAM_CHAT_ID=""
+WHITELIST_COUNTRIES=""
+BLOCKLIST_COUNTRIES=""
+DYNDNS_HOST=""
+ABUSEIPDB_API_KEY=""
+HONEYDB_API_ID=""
+HONEYDB_API_KEY=""
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_CHAT_ID=""
 
 load_env_vars() {
   if [[ -f "$KEYFILE" ]]; then
     chmod 600 "$KEYFILE"
     while IFS='=' read -r key val || [[ -n "$key" ]]; do
        [[ "$key" =~ ^# || -z "$key" ]] && continue
-       key="${key//export /}"; key="${key// /}"; val="${val%\"}"; val="${val#\"}"
-       [[ -n "$key" ]] && printf -v "$key" "%s" "$val"
+       key="${key//export /}"
+       key="${key// /}"
+       val="${val%\"}"
+       val="${val#\"}"
+       if [[ -n "$key" ]]; then
+           printf -v "$key" "%s" "$val"
+       fi
     done < "$KEYFILE"
   fi
 }
@@ -100,16 +151,20 @@ load_env_vars
 
 perform_auto_update() {
   if [[ "${1:-}" == "--post-update" ]]; then 
-      log "[AUTO-UPDATE] Update to $SCRIPT_VERSION successful."; 
+      log "[AUTO-UPDATE] Update to $SCRIPT_VERSION successful."
       return 0
   fi
-  if [[ $DRY_RUN -eq 1 ]]; then return 0; fi
+  
+  if [[ $DRY_RUN -eq 1 ]]; then 
+      return 0
+  fi
   
   local tmp="/tmp/update-fw.sh.new"
   if curl $CURL_OPTS -o "$tmp" "${REPO_RAW_URL}?t=$(date +%s)" || true; then
      if [[ -s "$tmp" ]]; then
          local remote_ver
          remote_ver=$(grep -oE 'SCRIPT_VERSION="v[0-9.]+"' "$tmp" | head -n1 | cut -d'"' -f2 || echo "unknown")
+         
          if [[ "$remote_ver" != "unknown" && "$remote_ver" != "$SCRIPT_VERSION" ]]; then
             log "[AUTO-UPDATE] New version found ($remote_ver). Updating from $SCRIPT_VERSION..."
             cp "$tmp" "$SCRIPT_BIN" && chmod +x "$SCRIPT_BIN"
@@ -118,7 +173,9 @@ perform_auto_update() {
          else
             rm -f "$tmp"
          fi
-     else rm -f "$tmp"; fi
+     else 
+        rm -f "$tmp"
+     fi
   fi
 }
 
@@ -131,7 +188,11 @@ check_connectivity() {
 
 send_telegram() {
     local msg="$1"
-    if [[ $DRY_RUN -eq 1 ]]; then dry "Telegram would send: $msg"; return; fi
+    if [[ $DRY_RUN -eq 1 ]]; then 
+        dry "Telegram would send: $msg"
+        return
+    fi
+    
     if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
         curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
             -d chat_id="$TELEGRAM_CHAT_ID" \
@@ -140,11 +201,9 @@ send_telegram() {
     fi
 }
 
-# --- SENSOR SETUP & CHECKS ---
-
+# --- SENSOR SETUP ---
 check_port_free() {
     local port="$1"
-    # Uses ss to check TCP (t) listening (l) numeric (n)
     if command -v ss >/dev/null; then
         if ss -tuln | grep -q ":$port "; then return 1; fi
     elif command -v netstat >/dev/null; then
@@ -156,32 +215,32 @@ check_port_free() {
 install_sensors() {
     echo ">>> Installing Sensors (Endlessh & Port-Scan Detection)..."
     
-    # Pre-Flight Check: Port 2222
+    # 1. Check Port 2222
     if ! check_port_free 2222; then
-        # Check if it is endlessh itself
         if ! pgrep -x "endlessh" >/dev/null; then
              echo "❌ Error: Port 2222 is already in use by another service!"
-             echo "   Please free up Port 2222 or edit endlessh config manually."
              return 1
         fi
     fi
 
-    # 1. Endlessh Installation
+    # 2. Install Endlessh (Extended OS Support)
     if ! command -v endlessh >/dev/null; then
         echo " -> Installing Endlessh package..."
-        if command -v apt-get >/dev/null; then
-            apt-get update -qq && apt-get install -y endlessh || { echo "❌ Apt install failed."; return 1; }
-        elif command -v yum >/dev/null; then
-            yum install -y endlessh || { echo "❌ Yum install failed."; return 1; }
-        else
-            echo "❌ Package manager not supported. Install 'endlessh' manually."
+        if command -v apt-get >/dev/null; then 
+            apt-get update -qq && apt-get install -y endlessh
+        elif command -v dnf >/dev/null; then
+            dnf install -y endlessh
+        elif command -v yum >/dev/null; then 
+            yum install -y endlessh
+        elif command -v zypper >/dev/null; then
+            zypper install -y endlessh
+        else 
+            echo "❌ OS not supported for auto-install. Please install 'endlessh' manually."
             return 1
         fi
-    else
-        echo " -> Endlessh already installed."
     fi
 
-    # 2. Configure Endlessh (Port 2222)
+    # 3. Configure Endlessh
     mkdir -p /etc/endlessh
     if [[ -d /etc/endlessh ]]; then
         echo " -> Configuring Endlessh on Port 2222..."
@@ -194,25 +253,19 @@ LogLevel 1
 BindFamily 0
 EOF
         systemctl enable --now endlessh
-        if systemctl is-active --quiet endlessh; then
-             echo "✅ Endlessh active on Port 2222."
-        else
-             echo "⚠️ Warning: Endlessh failed to start. Check 'systemctl status endlessh'."
-        fi
+        systemctl restart endlessh
     fi
 
-    # 3. Configure CrowdSec
+    # 4. Configure CrowdSec
     if command -v cscli >/dev/null; then
         echo " -> Installing CrowdSec Collections..."
         cscli collections install crowdsecurity/endlessh --force >/dev/null 2>&1 || true
         cscli collections install crowdsecurity/iptables --force >/dev/null 2>&1 || true
         
-        # Add Acquisition config if missing
         if ! grep -q "type: endlessh" /etc/crowdsec/acquis.yaml 2>/dev/null; then
             echo " -> Adding Endlessh & IPTables logs to CrowdSec..."
             cat <<YAML >> /etc/crowdsec/acquis.yaml
 
-# Firewall Sensors (Auto-added by v7.0)
 filenames:
   - /var/log/syslog
   - /var/log/kern.log
@@ -227,25 +280,19 @@ labels:
   type: endlessh
 YAML
             systemctl restart crowdsec
-            echo "✅ CrowdSec configured to read sensor logs."
-        else
-            echo " -> CrowdSec already configured."
+            echo "✅ CrowdSec configured."
         fi
-    else
-        echo "⚠️ CrowdSec not found. Install it first to use reporting features."
     fi
 }
 
 # --- MENUS ---
 update_env_var() {
-    local key="$1"; local val="$2"
+    local key="$1"
+    local val="$2"
     [[ ! -f "$KEYFILE" ]] && touch "$KEYFILE"
-    if grep -q "^$key=" "$KEYFILE" || true; then 
-        if grep -q "^$key=" "$KEYFILE"; then
-            sed -i "s|^$key=.*|$key=\"$val\"|" "$KEYFILE"
-        else
-            echo "$key=\"$val\"" >> "$KEYFILE"
-        fi
+    
+    if grep -q "^$key=" "$KEYFILE"; then 
+        sed -i "s|^$key=.*|$key=\"$val\"|" "$KEYFILE"
     else 
         echo "$key=\"$val\"" >> "$KEYFILE"
     fi
@@ -253,12 +300,15 @@ update_env_var() {
 }
 
 ask_user() {
-    local prompt="$1"; local var_name="$2"; local current_val="${!var_name:-}"
+    local prompt="$1"
+    local var_name="$2"
+    local current_val="${!var_name:-}"
+    
     read -p "$prompt [Current: ${current_val:-None}] (Type 'none' to clear): " input
-    if [[ "$input" == "none" ]]; then
+    if [[ "$input" == "none" ]]; then 
         update_env_var "$var_name" ""
         echo " -> Cleared."
-    elif [[ -n "$input" ]]; then
+    elif [[ -n "$input" ]]; then 
         update_env_var "$var_name" "$input"
     fi
 }
@@ -280,7 +330,6 @@ menu_keys() {
 
 menu_telegram() {
     echo -e "\n--- 📢 Telegram Notifications ---"
-    echo "To get these values: Create a bot with @BotFather, then get your user ID from @userinfobot."
     ask_user "Telegram Bot Token" "TELEGRAM_BOT_TOKEN"
     ask_user "Telegram Chat ID" "TELEGRAM_CHAT_ID"
     load_env_vars
@@ -297,15 +346,16 @@ menu_lists() {
     local current_content; current_content=$(cat "$SOURCE_FILE")
     local new_content=""
     echo "Select lists to ENABLE (y) or DISABLE (n/Enter):"
+    
     for entry in "${RECOMMENDED_LISTS[@]}"; do
-        local name="${entry%%|*}"; local url="${entry#*|}"
-        local status="[ ]"
+        local name="${entry%%|*}"
+        local url="${entry#*|}"
+        
         if echo "$current_content" | grep -Fq "$url"; then
-            status="[\033[1;32mx\033[0m]" # Green X
-            read -p "$(echo -e "$status $name") - Keep? (Y/n): " yn
+            read -p "$(echo -e "[\033[1;32mx\033[0m] $name") - Keep? (Y/n): " yn
             if [[ ! "$yn" =~ ^[Nn]$ ]]; then new_content+="$url"$'\n'; fi
         else
-            read -p "$(echo -e "$status $name") - Enable? (y/N): " yn
+            read -p "$(echo -e "[ ] $name") - Enable? (y/N): " yn
             if [[ "$yn" =~ ^[Yy]$ ]]; then new_content+="$url"$'\n'; fi
         fi
     done
@@ -315,31 +365,23 @@ menu_lists() {
 
 menu_timer() {
     echo -e "\n--- ⏲️ Update Interval (Systemd Timer) ---"
-    if [[ ! -f "$TIMER_FILE" ]]; then echo "Error: Timer file not found."; return; fi
-    local current_timer
-    current_timer=$(grep "OnCalendar" "$TIMER_FILE" | cut -d= -f2 || echo "Unknown")
-    echo "Current Interval: $current_timer"
-    echo "Examples: 'hourly', 'daily', '*-*-* 04:00:00'"
-    read -p "New Interval (Enter to keep): " new_val
+    if [[ ! -f "$TIMER_FILE" ]]; then 
+        echo "Error: Timer file not found."
+        return
+    fi
+    read -p "New Interval (e.g., 'hourly', 'daily', '*-*-* 04:00:00'): " new_val
     if [[ -n "$new_val" ]]; then
-        if command -v systemd-analyze >/dev/null; then
-             if ! systemd-analyze calendar "$new_val" >/dev/null 2>&1; then
-                 echo "❌ Invalid Systemd calendar format. Aborted."
-                 return
-             fi
-        fi
         sed -i "s|^OnCalendar=.*|OnCalendar=$new_val|" "$TIMER_FILE"
         systemctl daemon-reload
         systemctl restart firewall-blocklist-updater.timer
-        echo "✅ Timer updated to: $new_val (Active)"
-    else
-        echo " -> No change."
+        echo "✅ Timer updated to: $new_val"
     fi
 }
 
 update_crowdsec_abuseipdb() {
     local key="$1"
     if ! command -v crowdsec >/dev/null; then return 0; fi
+    
     echo " -> Updating CrowdSec config..."
     if [[ -z "$key" ]]; then
         [[ -f /etc/crowdsec/profiles.yaml ]] && sed -i '/- abuseipdb/d' /etc/crowdsec/profiles.yaml
@@ -378,12 +420,11 @@ interactive_menu() {
     set +e 
     while true; do
         clear
-        # Sensor Status Check for Menu
         local sensor_status="[\033[0;31mNOT INSTALLED\033[0m]"
         if command -v endlessh >/dev/null && grep -q "type: endlessh" /etc/crowdsec/acquis.yaml 2>/dev/null; then
             sensor_status="[\033[1;32mACTIVE\033[0m]"
         fi
-
+        
         echo "==============================================="
         echo "   Firewall Admin Menu ($SCRIPT_VERSION)       "
         echo "==============================================="
@@ -396,6 +437,7 @@ interactive_menu() {
         echo "7) 🔄 Run Update NOW"
         echo "0) Exit"
         echo "-----------------------------------------------"
+        
         read -p "Select option: " opt
         case $opt in
             1) menu_geo ;;
@@ -408,23 +450,29 @@ interactive_menu() {
             0) exit 0 ;;
             *) echo "Invalid option" ;;
         esac
-        echo ""
-        read -p "Press Enter to return to menu..."
     done
     set -e
 }
 
 # --- Core Logic ---
-TMPDIR="/tmp/firewall-blocklists"; mkdir -p "$TMPDIR"
-IPSET_WL="allowed_whitelist"; IPSET_BL="blocklist_all"
-IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
+TMPDIR="/tmp/firewall-blocklists"
+mkdir -p "$TMPDIR"
+IPSET_WL="allowed_whitelist"
+IPSET_BL="blocklist_all"
+IPSET_HASH_SIZE=4096
+IPSET_MAX_ELEM=2000000
 
 get_set_count() {
     ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0
 }
 
 smart_extract() {
-    local f="$1"; local m=""; command -v file >/dev/null && m=$(file --mime-type -b "$f")
+    local f="$1"
+    local m=""
+    if command -v file >/dev/null; then
+         m=$(file --mime-type -b "$f")
+    fi
+    
     case "$m" in
         application/zip) unzip -p "$f" || true ;;
         application/gzip|application/x-gzip) gunzip -c "$f" || true ;;
@@ -435,9 +483,15 @@ smart_extract() {
 download_parallel() {
   local out="$1"; shift; local srcs=("$@")
   : > "$TMPDIR/merge.lst"
-  [[ ${#srcs[@]} -eq 0 ]] && touch "$out" && return 0
+  
+  if [[ ${#srcs[@]} -eq 0 ]]; then
+      touch "$out"
+      return 0
+  fi
+  
   export -f smart_extract
   export TMPDIR CURL_OPTS
+  
   printf '%s\n' "${srcs[@]}" | xargs -P4 -I{} bash -c '
     u="{}"; f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
     if curl '"$CURL_OPTS"' -A "fw-updater" "$u" -o "$TMPDIR/$f"; then
@@ -447,13 +501,20 @@ download_parallel() {
             echo "" >> "$TMPDIR/merge.lst"
         fi
     fi'
+  
   sed -i 's/[#;].*//g' "$TMPDIR/merge.lst"
   sort -u "$TMPDIR/merge.lst" > "$out"
 }
 
 extract_ips() {
-    local input="$1"; local output="$2"; local family="$3"
-    [[ ! -f "$input" ]] && touch "$output" && return 0
+    local input="$1"
+    local output="$2"
+    local family="$3"
+    
+    if [[ ! -f "$input" ]]; then
+        touch "$output"
+        return 0
+    fi
 
     if [[ "$family" == "inet" ]]; then
         grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" > "$input.tmp" || true
@@ -471,16 +532,18 @@ extract_ips() {
             grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' | \
             grep -E '[0-9a-fA-F]' | \
             grep -vE "^::1$" > "$output" || true
-        else
-             touch "$output"
+        else 
+            touch "$output"
         fi
     fi
 }
 
 backup_sets() {
     local setname="$1"
-    if [[ $DRY_RUN -eq 1 ]]; then dry "Would backup set $setname"; return; fi
-    # Save current set if it exists
+    if [[ $DRY_RUN -eq 1 ]]; then 
+        dry "Would backup set $setname"
+        return
+    fi
     if ipset list "$setname" >/dev/null 2>&1; then
         ipset save "$setname" > "$BACKUP_DIR/$setname.save" 2>/dev/null || true
     fi
@@ -495,9 +558,11 @@ restore_backup() {
 }
 
 load_ipset() {
-  local file="$1"; local setname="$2"; local family="$3"
-  [[ ! -s "$file" ]] && return 0
+  local file="$1"
+  local setname="$2"
+  local family="$3"
   
+  if [[ ! -s "$file" ]]; then return 0; fi
   if [[ "$family" == "inet6" && $IPV6_ENABLED -eq 0 ]]; then return 0; fi
 
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -527,13 +592,26 @@ load_ipset() {
 
 update_dyndns() {
   [[ -z "$DYNDNS_HOST" ]] && return 0
-  if [[ $DRY_RUN -eq 1 ]]; then dry "Would update DynDNS for $DYNDNS_HOST"; return; fi
   
-  local ip=""; 
-  if command -v dig >/dev/null; then ip=$(dig +short "$DYNDNS_HOST" | head -n1 || true); 
-  elif command -v host >/dev/null; then ip=$(host "$DYNDNS_HOST" | awk '/has address/ { print $4 }' | head -n1 || true); fi
+  if [[ $DRY_RUN -eq 1 ]]; then 
+      dry "Would update DynDNS for $DYNDNS_HOST"
+      return
+  fi
+  
+  local ip=""
+  # Improved DNS fallback using getent (native libc) if dig/host are missing
+  if command -v dig >/dev/null; then 
+      ip=$(dig +short "$DYNDNS_HOST" | head -n1 || true)
+  elif command -v host >/dev/null; then 
+      ip=$(host "$DYNDNS_HOST" | awk '/has address/ { print $4 }' | head -n1 || true)
+  elif command -v getent >/dev/null; then
+      ip=$(getent hosts "$DYNDNS_HOST" | awk '{ print $1 }' | head -n1 || true)
+  fi
+  
   if [[ -n "$ip" ]]; then
-     local t="$IPSET_WL"; [[ "$ip" =~ : ]] && t="${IPSET_WL}_v6"
+     local t="$IPSET_WL"
+     [[ "$ip" =~ : ]] && t="${IPSET_WL}_v6"
+     
      if [[ "$t" == "${IPSET_WL}_v6" && $IPV6_ENABLED -eq 0 ]]; then return; fi
      ipset add "$t" "$ip" -exist 2>/dev/null || true
   fi
@@ -561,13 +639,11 @@ main() {
   log "=== Update Start $SCRIPT_VERSION ==="
   
   if [[ $HAS_FLOCK -eq 1 && $DRY_RUN -eq 0 ]]; then 
-      if [[ -f "$LOCKFILE" ]]; then
-          if ! kill -0 $(fuser "$LOCKFILE" 2>/dev/null) 2>/dev/null; then
-               rm -f "$LOCKFILE"
-          fi
-      fi
       exec 9>"$LOCKFILE"
-      if ! flock -n 9; then echo "[ERROR] Script running."; exit 1; fi
+      if ! flock -n 9; then 
+          echo "[ERROR] Script already running (locked)."
+          exit 1
+      fi
   fi
   
   check_connectivity
@@ -582,74 +658,60 @@ main() {
   local cnt_old_v4; cnt_old_v4=$(get_set_count "$IPSET_BL")
   local cnt_old_v6; cnt_old_v6=$(get_set_count "${IPSET_BL}_v6")
 
-  # --- WHITELIST ---
-  : > "$TMPDIR/wl_raw.lst" # Reset
+  log "Processing Whitelists..."
+  : > "$TMPDIR/wl_raw.lst"
   local wl=(); [[ -f "$CONFIG_DIR/whitelist.sources" ]] && mapfile -t wl < <(grep -vE '^\s*#' "$CONFIG_DIR/whitelist.sources" || true)
   for c in $WHITELIST_COUNTRIES; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
   download_parallel "$TMPDIR/wl_raw.lst" "${wl[@]}"
   
-  if [[ -f "$CUSTOM_WL_FILE" ]]; then
-      log "Adding custom whitelist entries from $CUSTOM_WL_FILE"
-      cat "$CUSTOM_WL_FILE" >> "$TMPDIR/wl_raw.lst"
-      echo "" >> "$TMPDIR/wl_raw.lst"
-  fi
-  
-  if [[ -n "${SSH_CLIENT:-}" ]]; then
-      local ssh_ip; ssh_ip=$(echo "$SSH_CLIENT" | awk '{ print $1 }')
-      log "Safety: Whitelisting current SSH Session IP ($ssh_ip)"
-      echo "$ssh_ip" >> "$TMPDIR/wl_raw.lst"
-      echo "" >> "$TMPDIR/wl_raw.lst"
-  fi
+  [[ -f "$CUSTOM_WL_FILE" ]] && cat "$CUSTOM_WL_FILE" >> "$TMPDIR/wl_raw.lst"
+  if [[ -n "${SSH_CLIENT:-}" ]]; then echo "$SSH_CLIENT" | awk '{print $1}' >> "$TMPDIR/wl_raw.lst"; fi
   
   extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v4" "inet"
   extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v6" "inet6"
 
-  # --- BLOCKLIST ---
+  log "Processing Blocklists..."
   local bl=(); [[ -f "$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "$CONFIG_DIR/blocklist.sources" || true)
   for c in $BLOCKLIST_COUNTRIES; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
   download_parallel "$TMPDIR/bl_raw.lst" "${bl[@]}"
 
   if [[ -n "${HONEYDB_API_ID:-}" && -n "${HONEYDB_API_KEY:-}" ]]; then
+      log "Fetching HoneyDB Lists..."
       curl $CURL_OPTS -H "X-HoneyDb-ApiId: $HONEYDB_API_ID" -H "X-HoneyDb-ApiKey: $HONEYDB_API_KEY" "https://honeydb.io/api/bad-hosts" -o "$TMPDIR/h.lst"
-      if [[ -s "$TMPDIR/h.lst" ]]; then
-          cat "$TMPDIR/h.lst" >> "$TMPDIR/bl_raw.lst"
-          echo "" >> "$TMPDIR/bl_raw.lst"
-      fi
+      [[ -s "$TMPDIR/h.lst" ]] && cat "$TMPDIR/h.lst" >> "$TMPDIR/bl_raw.lst"
   fi
 
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
 
-  # Filter Private Ranges
+  log "Filtering & Merging Lists..."
   grep -vE "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)" "$TMPDIR/bl.v4" > "$TMPDIR/bl.v4.tmp" && mv "$TMPDIR/bl.v4.tmp" "$TMPDIR/bl.v4"
-
-  # Filter Whitelist
   sort -u "$TMPDIR/bl.v4" | comm -23 - <(sort -u "$TMPDIR/wl.v4") > "$TMPDIR/bl_final.v4"
   sort -u "$TMPDIR/bl.v6" | comm -23 - <(sort -u "$TMPDIR/wl.v6") > "$TMPDIR/bl_final.v6"
 
-  # Apply Sets
+  log "Applying Firewall Rules..."
   load_ipset "$TMPDIR/wl.v4" "$IPSET_WL" "inet"
   load_ipset "$TMPDIR/bl_final.v4" "$IPSET_BL" "inet"
   load_ipset "$TMPDIR/wl.v6" "${IPSET_WL}_v6" "inet6"
   load_ipset "$TMPDIR/bl_final.v6" "${IPSET_BL}_v6" "inet6"
 
   if [[ $DRY_RUN -eq 0 ]]; then
+      log "Updating IPTables..."
       iptables -C INPUT -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set "$IPSET_BL" src -j DROP
       if [[ $IPV6_ENABLED -eq 1 ]]; then
           command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP; }
       fi
       ensure_sensor_logging
-  else
+  else 
       dry "Would insert IPTables rules now."
   fi
   
   update_dyndns
 
-  # --- STATS ---
   local cnt_new_v4; cnt_new_v4=$(get_set_count "$IPSET_BL")
   local cnt_new_v6; cnt_new_v6=$(get_set_count "${IPSET_BL}_v6")
   
-  if [[ $DRY_RUN -eq 1 ]]; then
+  if [[ $DRY_RUN -eq 1 ]]; then 
       cnt_new_v4=$(wc -l < "$TMPDIR/bl_final.v4" || echo 0)
       cnt_new_v6=$(wc -l < "$TMPDIR/bl_final.v6" || echo 0)
   fi
@@ -660,8 +722,8 @@ main() {
   local s_v6=""; [[ $diff_v6 -ge 0 ]] && s_v6="+"
 
   local report="📊 Update Summary ($SCRIPT_VERSION)%0AIPv4 Blocked: $cnt_new_v4 ($s_v4$diff_v4)%0AIPv6 Blocked: $cnt_new_v6 ($s_v6$diff_v6)"
-  if [[ $IPV6_ENABLED -eq 0 ]]; then report="$report (IPv6 Disabled)"; fi
-  if [[ $DRY_RUN -eq 1 ]]; then report="⚠️ DRY-RUN REPORT%0A$report"; fi
+  [[ $IPV6_ENABLED -eq 0 ]] && report="$report (IPv6 Disabled)"
+  [[ $DRY_RUN -eq 1 ]] && report="⚠️ DRY-RUN REPORT%0A$report"
 
   echo "------------------------------------------------"
   echo -e "${report//%0A/\\n}"
