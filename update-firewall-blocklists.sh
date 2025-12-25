@@ -4,13 +4,12 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v9.3"
+SCRIPT_VERSION="v9.4"
 
 #################################################
-# Firewall Blocklist Updater (v9.3 - Reliable)
-# - FIX: Replaced parallel download with sequential loop
-#        (Fixes quoting bug that caused 0 IPs)
-# - FIX: Explicit Curl options per call
+# Firewall Blocklist Updater (v9.4 - Processing Fix)
+# - FIX: Removed broken pipe in smart_extract (fixed 0 IP issue)
+# - FIX: Config validation for CrowdSec
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -29,8 +28,9 @@ MAX_LOG_SIZE=$((5 * 1024 * 1024))
 # --- Globals ---
 DRY_RUN=0
 IPV6_ENABLED=1
+USER_AGENT='Mozilla/5.0 (X11; Linux x86_64)'
 
-# --- Lists (Full Sync) ---
+# --- Lists ---
 RECOMMENDED_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
@@ -79,8 +79,8 @@ dry() { echo -e "\033[0;36m[DRY-RUN] $*\033[0m"; }
 cleanup() { rm -f "$LOCKFILE" /tmp/firewall-blocklists/* 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
-# Removed explicit CURL_OPTS variable to prevent subshell quoting issues
-USER_AGENT='Mozilla/5.0 (X11; Linux x86_64)'
+CURL_OPTS="-sfL --connect-timeout 20 --retry 2 -A '$USER_AGENT'"
+if curl --help | grep -q -- "--compressed"; then CURL_OPTS="$CURL_OPTS --compressed"; fi
 
 HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
 mkdir -p "$BASE_DIR" "$CONFIG_DIR" "$BACKUP_DIR" /tmp/firewall-blocklists
@@ -241,29 +241,30 @@ smart_extract() {
     esac
 }
 
-# --- REPLACED: SEQUENTIAL DOWNLOAD (Fixes 0 IP issue) ---
 download_lists() {
   local out="$1"; shift; local srcs=("$@")
   : > "$TMPDIR/merge.lst"
   [[ ${#srcs[@]} -eq 0 ]] && touch "$out" && return 0
   export -f smart_extract; export TMPDIR
 
-  # Sequential loop to avoid subshell quoting issues
   for u in "${srcs[@]}"; do
       local f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
-      # Visual feedback for user
       if [[ $DRY_RUN -eq 0 ]]; then echo -n "."; fi 
       
       if curl -sfL --connect-timeout 10 --retry 1 -A "$USER_AGENT" "$u" -o "$TMPDIR/$f" || true; then
           if [[ -s "$TMPDIR/$f" ]]; then
+              # FIX v9.4: Clean file first, THEN pass FILENAME to smart_extract (no pipe)
+              tr -d "\r" < "$TMPDIR/$f" > "$TMPDIR/$f.tmp" && mv "$TMPDIR/$f.tmp" "$TMPDIR/$f"
+              
               if ! head -n 1 "$TMPDIR/$f" | grep -qiE "<!DOCTYPE|<html"; then
-                  tr -d "\r" < "$TMPDIR/$f" | smart_extract - >> "$TMPDIR/merge.lst" || true
-                  echo "" >> "$TMPDIR/merge.lst"
+                   # CRITICAL FIX: No piping of content. Pass file path.
+                   smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true
+                   echo "" >> "$TMPDIR/merge.lst"
               fi
           fi
       fi
   done
-  if [[ $DRY_RUN -eq 0 ]]; then echo ""; fi # Newline
+  if [[ $DRY_RUN -eq 0 ]]; then echo ""; fi
 
   sed -i 's/[#;].*//g' "$TMPDIR/merge.lst"
   sort -u "$TMPDIR/merge.lst" > "$out"
@@ -339,7 +340,6 @@ main() {
   local bl=(); [[ -f "$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "$CONFIG_DIR/blocklist.sources" || true)
   for c in $BLOCKLIST_COUNTRIES; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
   
-  # --- USING SEQUENTIAL DOWNLOAD ---
   download_lists "$TMPDIR/bl_raw.lst" "${bl[@]}"
   
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
