@@ -3,16 +3,15 @@ set -euo pipefail
 export LC_ALL=C 
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v6.8"
+SCRIPT_VERSION="v7.0"
 
 #################################################
-# Firewall Blocklist Updater (v6.8 - Final Polish)
-# - FIX: Output Formatting (Newline Glitch)
-# - HARDENING: Stale Lock File Removal
-# - HARDENING: Input Validation for Custom Whitelists
-# - HARDENING: Zero-Byte File Protection
-# - FEAT: Smart IPv6, Self-Healing, Dry-Run
-# - FEAT: Telegram, SSH-Safety, Atomic Swap
+# Firewall Blocklist Updater (v7.0 - Architect)
+# - FEAT: Port Conflict Detection (Safety Check)
+# - FEAT: Intelligent Sensor Status & Setup
+# - HARDENING: Stale Lock Removal & Input Valid.
+# - CORE: Smart IPv6, Self-Healing, Dry-Run
+# - OPS: Telegram, SSH-Safety, Atomic Swap
 #################################################
 
 # --- Constants ---
@@ -72,12 +71,12 @@ HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
 mkdir -p "$BASE_DIR" "$CONFIG_DIR" "$BACKUP_DIR"
 
 check_dep() { if ! command -v "$1" &>/dev/null; then warn "Missing dependency: $1"; fi; }
-for cmd in curl ipset iptables grep sort comm unzip file dig awk tr ip; do check_dep "$cmd"; done
+# Added 'ss' for port check
+for cmd in curl ipset iptables grep sort comm unzip file dig awk tr ip ss; do check_dep "$cmd"; done
 
 # --- Smart IPv6 Check ---
 check_ipv6_stack() {
     if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi
-    # Check for global scope address (ignoring Link-Local)
     if ! ip -6 addr show scope global | grep -q "inet6"; then return 1; fi
     return 0
 }
@@ -138,6 +137,102 @@ send_telegram() {
             -d chat_id="$TELEGRAM_CHAT_ID" \
             -d text="$msg" \
             -d parse_mode="HTML" >/dev/null || true
+    fi
+}
+
+# --- SENSOR SETUP & CHECKS ---
+
+check_port_free() {
+    local port="$1"
+    # Uses ss to check TCP (t) listening (l) numeric (n)
+    if command -v ss >/dev/null; then
+        if ss -tuln | grep -q ":$port "; then return 1; fi
+    elif command -v netstat >/dev/null; then
+        if netstat -tuln | grep -q ":$port "; then return 1; fi
+    fi
+    return 0
+}
+
+install_sensors() {
+    echo ">>> Installing Sensors (Endlessh & Port-Scan Detection)..."
+    
+    # Pre-Flight Check: Port 2222
+    if ! check_port_free 2222; then
+        # Check if it is endlessh itself
+        if ! pgrep -x "endlessh" >/dev/null; then
+             echo "❌ Error: Port 2222 is already in use by another service!"
+             echo "   Please free up Port 2222 or edit endlessh config manually."
+             return 1
+        fi
+    fi
+
+    # 1. Endlessh Installation
+    if ! command -v endlessh >/dev/null; then
+        echo " -> Installing Endlessh package..."
+        if command -v apt-get >/dev/null; then
+            apt-get update -qq && apt-get install -y endlessh || { echo "❌ Apt install failed."; return 1; }
+        elif command -v yum >/dev/null; then
+            yum install -y endlessh || { echo "❌ Yum install failed."; return 1; }
+        else
+            echo "❌ Package manager not supported. Install 'endlessh' manually."
+            return 1
+        fi
+    else
+        echo " -> Endlessh already installed."
+    fi
+
+    # 2. Configure Endlessh (Port 2222)
+    mkdir -p /etc/endlessh
+    if [[ -d /etc/endlessh ]]; then
+        echo " -> Configuring Endlessh on Port 2222..."
+        cat <<EOF > /etc/endlessh/config
+Port 2222
+Delay 10000
+MaxLineLength 32
+MSL 0
+LogLevel 1
+BindFamily 0
+EOF
+        systemctl enable --now endlessh
+        if systemctl is-active --quiet endlessh; then
+             echo "✅ Endlessh active on Port 2222."
+        else
+             echo "⚠️ Warning: Endlessh failed to start. Check 'systemctl status endlessh'."
+        fi
+    fi
+
+    # 3. Configure CrowdSec
+    if command -v cscli >/dev/null; then
+        echo " -> Installing CrowdSec Collections..."
+        cscli collections install crowdsecurity/endlessh --force >/dev/null 2>&1 || true
+        cscli collections install crowdsecurity/iptables --force >/dev/null 2>&1 || true
+        
+        # Add Acquisition config if missing
+        if ! grep -q "type: endlessh" /etc/crowdsec/acquis.yaml 2>/dev/null; then
+            echo " -> Adding Endlessh & IPTables logs to CrowdSec..."
+            cat <<YAML >> /etc/crowdsec/acquis.yaml
+
+# Firewall Sensors (Auto-added by v7.0)
+filenames:
+  - /var/log/syslog
+  - /var/log/kern.log
+  - /var/log/messages
+labels:
+  type: iptables
+---
+filenames:
+  - /var/log/syslog
+  - /var/log/messages
+labels:
+  type: endlessh
+YAML
+            systemctl restart crowdsec
+            echo "✅ CrowdSec configured to read sensor logs."
+        else
+            echo " -> CrowdSec already configured."
+        fi
+    else
+        echo "⚠️ CrowdSec not found. Install it first to use reporting features."
     fi
 }
 
@@ -283,6 +378,12 @@ interactive_menu() {
     set +e 
     while true; do
         clear
+        # Sensor Status Check for Menu
+        local sensor_status="[\033[0;31mNOT INSTALLED\033[0m]"
+        if command -v endlessh >/dev/null && grep -q "type: endlessh" /etc/crowdsec/acquis.yaml 2>/dev/null; then
+            sensor_status="[\033[1;32mACTIVE\033[0m]"
+        fi
+
         echo "==============================================="
         echo "   Firewall Admin Menu ($SCRIPT_VERSION)       "
         echo "==============================================="
@@ -291,7 +392,8 @@ interactive_menu() {
         echo "3) 🔑 Configure API Keys (AbuseIPDB, HoneyDB)"
         echo "4) 📢 Configure Telegram Notifications"
         echo "5) ⏲️ Change Update Interval"
-        echo "6) 🔄 Run Update NOW"
+        echo -e "6) 🪤 Install Sensors $sensor_status"
+        echo "7) 🔄 Run Update NOW"
         echo "0) Exit"
         echo "-----------------------------------------------"
         read -p "Select option: " opt
@@ -301,7 +403,8 @@ interactive_menu() {
             3) menu_keys ;;
             4) menu_telegram ;;
             5) menu_timer ;;
-            6) main ;;
+            6) install_sensors; read -p "Press Enter..." ;;
+            7) main ;;
             0) exit 0 ;;
             *) echo "Invalid option" ;;
         esac
@@ -436,8 +539,19 @@ update_dyndns() {
   fi
 }
 
+ensure_sensor_logging() {
+    if [[ $DRY_RUN -eq 1 ]]; then return; fi
+    
+    if command -v crowdsec >/dev/null; then
+        if ! iptables -C INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " --log-level 4 2>/dev/null; then
+            iptables -A INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " --log-level 4 2>/dev/null || true
+        fi
+    fi
+}
+
 main() {
   if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=1; echo "⚠️ DRY-RUN MODE: No changes will be applied."; fi
+  if [[ "${1:-}" == "--setup-sensors" ]]; then install_sensors; exit 0; fi
 
   rm -rf "$TMPDIR"
   mkdir -p "$TMPDIR"
@@ -447,10 +561,8 @@ main() {
   log "=== Update Start $SCRIPT_VERSION ==="
   
   if [[ $HAS_FLOCK -eq 1 && $DRY_RUN -eq 0 ]]; then 
-      # Hardening: Check for stale locks
       if [[ -f "$LOCKFILE" ]]; then
           if ! kill -0 $(fuser "$LOCKFILE" 2>/dev/null) 2>/dev/null; then
-               # Lock exists but process is dead -> remove it
                rm -f "$LOCKFILE"
           fi
       fi
@@ -470,7 +582,7 @@ main() {
   local cnt_old_v4; cnt_old_v4=$(get_set_count "$IPSET_BL")
   local cnt_old_v6; cnt_old_v6=$(get_set_count "${IPSET_BL}_v6")
 
-  # --- WHITELIST PROCESSING ---
+  # --- WHITELIST ---
   : > "$TMPDIR/wl_raw.lst" # Reset
   local wl=(); [[ -f "$CONFIG_DIR/whitelist.sources" ]] && mapfile -t wl < <(grep -vE '^\s*#' "$CONFIG_DIR/whitelist.sources" || true)
   for c in $WHITELIST_COUNTRIES; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
@@ -489,11 +601,10 @@ main() {
       echo "" >> "$TMPDIR/wl_raw.lst"
   fi
   
-  # Clean and Extract IPs from Whitelist first to ensure validity
   extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v4" "inet"
   extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v6" "inet6"
 
-  # --- BLOCKLIST PROCESSING ---
+  # --- BLOCKLIST ---
   local bl=(); [[ -f "$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "$CONFIG_DIR/blocklist.sources" || true)
   for c in $BLOCKLIST_COUNTRIES; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
   download_parallel "$TMPDIR/bl_raw.lst" "${bl[@]}"
@@ -509,14 +620,14 @@ main() {
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
 
-  # Exclude Private Ranges
+  # Filter Private Ranges
   grep -vE "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)" "$TMPDIR/bl.v4" > "$TMPDIR/bl.v4.tmp" && mv "$TMPDIR/bl.v4.tmp" "$TMPDIR/bl.v4"
 
-  # Apply Whitelist Filter
+  # Filter Whitelist
   sort -u "$TMPDIR/bl.v4" | comm -23 - <(sort -u "$TMPDIR/wl.v4") > "$TMPDIR/bl_final.v4"
   sort -u "$TMPDIR/bl.v6" | comm -23 - <(sort -u "$TMPDIR/wl.v6") > "$TMPDIR/bl_final.v6"
 
-  # Load Sets
+  # Apply Sets
   load_ipset "$TMPDIR/wl.v4" "$IPSET_WL" "inet"
   load_ipset "$TMPDIR/bl_final.v4" "$IPSET_BL" "inet"
   load_ipset "$TMPDIR/wl.v6" "${IPSET_WL}_v6" "inet6"
@@ -527,13 +638,14 @@ main() {
       if [[ $IPV6_ENABLED -eq 1 ]]; then
           command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP; }
       fi
+      ensure_sensor_logging
   else
       dry "Would insert IPTables rules now."
   fi
   
   update_dyndns
 
-  # --- POST-STATS ---
+  # --- STATS ---
   local cnt_new_v4; cnt_new_v4=$(get_set_count "$IPSET_BL")
   local cnt_new_v6; cnt_new_v6=$(get_set_count "${IPSET_BL}_v6")
   
@@ -552,7 +664,6 @@ main() {
   if [[ $DRY_RUN -eq 1 ]]; then report="⚠️ DRY-RUN REPORT%0A$report"; fi
 
   echo "------------------------------------------------"
-  # FIX: Use printf or double backslash for proper newline rendering
   echo -e "${report//%0A/\\n}"
   echo "------------------------------------------------"
 
