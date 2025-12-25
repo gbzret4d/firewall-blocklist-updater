@@ -4,14 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v8.3"
+SCRIPT_VERSION="v8.6"
 
 #################################################
-# Firewall Blocklist Updater (v8.3 - Full List Sync)
-# - LISTS: Synced all 32 sources with Installer v8.5
-# - FIX: Set +u during config load (Prevents crash)
-# - FIX: Browser User-Agent (Fixes GreenSnow)
-# - FEAT: Full Sensor Suite (Endlessh + CrowdSec)
+# Firewall Blocklist Updater (v8.6 - Final Fix)
+# - FIX: Re-added '|| true' to grep pipes (Prevent crash on empty lists)
+# - LISTS: Full 32 Sources 
+# - REMOVED: HoneyDB 
 #################################################
 
 # --- Constants ---
@@ -105,13 +104,11 @@ TELEGRAM_CHAT_ID=""
 
 load_env_vars() {
   if [[ -f "$KEYFILE" ]]; then
-    # CRITICAL FIX: Disable nounset to prevent crash on empty lines
     set +u
     set -a
     source "$KEYFILE"
     set +a
     set -u
-    # Sanitize
     WHITELIST_COUNTRIES=$(echo "${WHITELIST_COUNTRIES:-}" | tr -cd 'A-Za-z ')
     BLOCKLIST_COUNTRIES=$(echo "${BLOCKLIST_COUNTRIES:-}" | tr -cd 'A-Za-z ')
   fi
@@ -193,7 +190,6 @@ menu_lists() {
     local new_content=""
     echo "Select lists to ENABLE (y) or DISABLE (n/Enter):"
     
-    # Iterate through ALL 32 Lists
     for entry in "${RECOMMENDED_LISTS[@]}"; do
         local name="${entry%%|*}"
         local url="${entry#*|}"
@@ -268,11 +264,14 @@ download_parallel() {
 extract_ips() {
     local input="$1"; local output="$2"; local family="$3"
     [[ ! -f "$input" ]] && touch "$output" && return 0
+    
+    # CRITICAL FIX v8.6: Added '|| true' to grep commands.
+    # Prevents crash (Exit Code 1) if input file is empty (e.g. no whitelist countries)
     if [[ "$family" == "inet" ]]; then
-        grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" | awk -F'[./]' '{valid=1; for(i=1;i<=4;i++)if($i>255)valid=0; if(NF>4&&$NF>32)valid=0; if(valid)print $0}' > "$output"
+        grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" | awk -F'[./]' '{valid=1; for(i=1;i<=4;i++)if($i>255)valid=0; if(NF>4&&$NF>32)valid=0; if(valid)print $0}' > "$output" || true
     else
         if [[ $IPV6_ENABLED -eq 1 ]]; then
-            grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$input" | grep -vE "^::1$" > "$output"
+            grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$input" | grep -vE "^::1$" > "$output" || true
         else touch "$output"; fi
     fi
 }
@@ -333,9 +332,9 @@ main() {
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
 
-  # Filter
-  grep -vE "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)" "$TMPDIR/bl.v4" | sort -u | comm -23 - <(sort -u "$TMPDIR/wl.v4") > "$TMPDIR/bl_final.v4"
-  sort -u "$TMPDIR/bl.v6" | comm -23 - <(sort -u "$TMPDIR/wl.v6") > "$TMPDIR/bl_final.v6"
+  # Filter - CRITICAL FIX v8.6: || true added to prevent crash on empty filtering
+  grep -vE "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)" "$TMPDIR/bl.v4" | sort -u | comm -23 - <(sort -u "$TMPDIR/wl.v4") > "$TMPDIR/bl_final.v4" || true
+  sort -u "$TMPDIR/bl.v6" | comm -23 - <(sort -u "$TMPDIR/wl.v6") > "$TMPDIR/bl_final.v6" || true
 
   load_ipset "$TMPDIR/wl.v4" "$IPSET_WL" "inet"
   load_ipset "$TMPDIR/bl_final.v4" "$IPSET_BL" "inet"
