@@ -4,13 +4,12 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v9.5"
+SCRIPT_VERSION="v9.6"
 
 #################################################
-# Firewall Blocklist Updater (v9.5 - Panic Fix)
-# - FIX: Replaced 'file' mime-check with robust try-parse
-#        (Fixes 0 IP issue on systems with varying magic files)
-# - FIX: Added HTTP Status Code check to curl
+# Firewall Blocklist Updater (v9.6 - Syntax Fix)
+# - FIX: Filters out '::' and '0.0.0.0' to prevent IPSet syntax errors
+# - FIX: Robust extraction logic (no file mime check)
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -230,17 +229,13 @@ IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
 
 get_set_count() { ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
 
-# --- FIX 9.5: FAIL-SAFE EXTRACTION ---
-# No piping 'file'. Just try to unzip/gunzip, else cat.
+# --- EXTRACTION SAFEGUARD ---
 smart_extract() {
     local f="$1"
-    # Check if gzip (gzip -t checks integrity)
     if gzip -t "$f" 2>/dev/null; then
         zcat "$f"
-    # Check if zip
     elif unzip -t "$f" 2>/dev/null; then
         unzip -p "$f"
-    # Else assume text
     else
         cat "$f"
     fi
@@ -256,17 +251,15 @@ download_lists() {
       local f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
       if [[ $DRY_RUN -eq 0 ]]; then echo -n "."; fi 
       
-      # FIX: Verbose download (show if 403/404 happens)
       if curl -sL --fail --connect-timeout 10 --retry 1 -A "$USER_AGENT" "$u" -o "$TMPDIR/$f"; then
           if [[ -s "$TMPDIR/$f" ]]; then
+              tr -d "\r" < "$TMPDIR/$f" > "$TMPDIR/$f.tmp" && mv "$TMPDIR/$f.tmp" "$TMPDIR/$f"
               if ! head -n 1 "$TMPDIR/$f" | grep -qiE "<!DOCTYPE|<html"; then
-                   # Call clean extraction
                    smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true
                    echo "" >> "$TMPDIR/merge.lst"
               fi
           fi
       else
-          # If download fails, log it but don't stop
           if [[ $DRY_RUN -eq 0 ]]; then echo -n "x"; fi
       fi
   done
@@ -280,10 +273,12 @@ extract_ips() {
     local input="$1"; local output="$2"; local family="$3"
     [[ ! -f "$input" ]] && touch "$output" && return 0
     if [[ "$family" == "inet" ]]; then
-        grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" | awk -F'[./]' '{valid=1; for(i=1;i<=4;i++)if($i>255)valid=0; if(NF>4&&$NF>32)valid=0; if(valid)print $0}' > "$output" || true
+        # FIX v9.6: Filter 0.0.0.0 (Invalid for ipset hash:net)
+        grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" | awk -F'[./]' '{valid=1; for(i=1;i<=4;i++)if($i>255)valid=0; if(NF>4&&$NF>32)valid=0; if(valid)print $0}' | grep -vE "^0\.0\.0\.0$" > "$output" || true
     else
         if [[ $IPV6_ENABLED -eq 1 ]]; then
-            grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$input" | grep -vE "^::1$" > "$output" || true
+            # FIX v9.6: Filter :: (Unspecified address) causing "cannot parse ::" error
+            grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$input" | grep -vE "^::1$|^::$" > "$output" || true
         else touch "$output"; fi
     fi
 }
