@@ -4,12 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v9.4"
+SCRIPT_VERSION="v9.5"
 
 #################################################
-# Firewall Blocklist Updater (v9.4 - Processing Fix)
-# - FIX: Removed broken pipe in smart_extract (fixed 0 IP issue)
-# - FIX: Config validation for CrowdSec
+# Firewall Blocklist Updater (v9.5 - Panic Fix)
+# - FIX: Replaced 'file' mime-check with robust try-parse
+#        (Fixes 0 IP issue on systems with varying magic files)
+# - FIX: Added HTTP Status Code check to curl
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -28,9 +29,9 @@ MAX_LOG_SIZE=$((5 * 1024 * 1024))
 # --- Globals ---
 DRY_RUN=0
 IPV6_ENABLED=1
-USER_AGENT='Mozilla/5.0 (X11; Linux x86_64)'
+USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-# --- Lists ---
+# --- Lists (Full Sync) ---
 RECOMMENDED_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
@@ -78,9 +79,6 @@ dry() { echo -e "\033[0;36m[DRY-RUN] $*\033[0m"; }
 
 cleanup() { rm -f "$LOCKFILE" /tmp/firewall-blocklists/* 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
-
-CURL_OPTS="-sfL --connect-timeout 20 --retry 2 -A '$USER_AGENT'"
-if curl --help | grep -q -- "--compressed"; then CURL_OPTS="$CURL_OPTS --compressed"; fi
 
 HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
 mkdir -p "$BASE_DIR" "$CONFIG_DIR" "$BACKUP_DIR" /tmp/firewall-blocklists
@@ -232,13 +230,20 @@ IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
 
 get_set_count() { ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
 
+# --- FIX 9.5: FAIL-SAFE EXTRACTION ---
+# No piping 'file'. Just try to unzip/gunzip, else cat.
 smart_extract() {
-    local f="$1"; local m=$(file --mime-type -b "$f")
-    case "$m" in
-        application/zip) unzip -p "$f" || true ;;
-        application/gzip|application/x-gzip) gunzip -c "$f" || true ;;
-        *) cat "$f" ;;
-    esac
+    local f="$1"
+    # Check if gzip (gzip -t checks integrity)
+    if gzip -t "$f" 2>/dev/null; then
+        zcat "$f"
+    # Check if zip
+    elif unzip -t "$f" 2>/dev/null; then
+        unzip -p "$f"
+    # Else assume text
+    else
+        cat "$f"
+    fi
 }
 
 download_lists() {
@@ -251,17 +256,18 @@ download_lists() {
       local f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
       if [[ $DRY_RUN -eq 0 ]]; then echo -n "."; fi 
       
-      if curl -sfL --connect-timeout 10 --retry 1 -A "$USER_AGENT" "$u" -o "$TMPDIR/$f" || true; then
+      # FIX: Verbose download (show if 403/404 happens)
+      if curl -sL --fail --connect-timeout 10 --retry 1 -A "$USER_AGENT" "$u" -o "$TMPDIR/$f"; then
           if [[ -s "$TMPDIR/$f" ]]; then
-              # FIX v9.4: Clean file first, THEN pass FILENAME to smart_extract (no pipe)
-              tr -d "\r" < "$TMPDIR/$f" > "$TMPDIR/$f.tmp" && mv "$TMPDIR/$f.tmp" "$TMPDIR/$f"
-              
               if ! head -n 1 "$TMPDIR/$f" | grep -qiE "<!DOCTYPE|<html"; then
-                   # CRITICAL FIX: No piping of content. Pass file path.
+                   # Call clean extraction
                    smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true
                    echo "" >> "$TMPDIR/merge.lst"
               fi
           fi
+      else
+          # If download fails, log it but don't stop
+          if [[ $DRY_RUN -eq 0 ]]; then echo -n "x"; fi
       fi
   done
   if [[ $DRY_RUN -eq 0 ]]; then echo ""; fi
