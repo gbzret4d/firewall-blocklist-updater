@@ -4,13 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v8.6"
+SCRIPT_VERSION="v8.7"
 
 #################################################
-# Firewall Blocklist Updater (v8.6 - Final Fix)
-# - FIX: Re-added '|| true' to grep pipes (Prevent crash on empty lists)
-# - LISTS: Full 32 Sources 
-# - REMOVED: HoneyDB 
+# Firewall Blocklist Updater (v8.7 - YAML Fix)
+# - FIX: Safe YAML appending for Sensors (No more echo -e)
+# - FIX: Prevents crash on empty lists (grep || true)
+# - LISTS: Full 32 Sources (Synced with Installer v8.5)
 #################################################
 
 # --- Constants ---
@@ -166,8 +166,21 @@ install_sensors() {
     if command -v cscli >/dev/null; then
         cscli collections install crowdsecurity/endlessh --force >/dev/null 2>&1 || true
         cscli collections install crowdsecurity/iptables --force >/dev/null 2>&1 || true
+        
+        # CRITICAL FIX v8.7: Use safe YAML appending with separator
         if ! grep -q "type: endlessh" /etc/crowdsec/acquis.yaml 2>/dev/null; then
-            echo -e "\nfilenames:\n  - /var/log/syslog\n  - /var/log/messages\nlabels:\n  type: endlessh" >> /etc/crowdsec/acquis.yaml
+            echo " -> Adding Sensor config to CrowdSec..."
+            
+            # Add separator if file not empty
+            if [[ -s /etc/crowdsec/acquis.yaml ]]; then echo "---" >> /etc/crowdsec/acquis.yaml; fi
+            
+            cat <<YAML >> /etc/crowdsec/acquis.yaml
+filenames:
+  - /var/log/syslog
+  - /var/log/messages
+labels:
+  type: endlessh
+YAML
             systemctl restart crowdsec
         fi
         echo "✅ Sensors Configured."
@@ -264,9 +277,6 @@ download_parallel() {
 extract_ips() {
     local input="$1"; local output="$2"; local family="$3"
     [[ ! -f "$input" ]] && touch "$output" && return 0
-    
-    # CRITICAL FIX v8.6: Added '|| true' to grep commands.
-    # Prevents crash (Exit Code 1) if input file is empty (e.g. no whitelist countries)
     if [[ "$family" == "inet" ]]; then
         grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" | awk -F'[./]' '{valid=1; for(i=1;i<=4;i++)if($i>255)valid=0; if(NF>4&&$NF>32)valid=0; if(valid)print $0}' > "$output" || true
     else
@@ -332,7 +342,7 @@ main() {
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
 
-  # Filter - CRITICAL FIX v8.6: || true added to prevent crash on empty filtering
+  # Filter
   grep -vE "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)" "$TMPDIR/bl.v4" | sort -u | comm -23 - <(sort -u "$TMPDIR/wl.v4") > "$TMPDIR/bl_final.v4" || true
   sort -u "$TMPDIR/bl.v6" | comm -23 - <(sort -u "$TMPDIR/wl.v6") > "$TMPDIR/bl_final.v6" || true
 
