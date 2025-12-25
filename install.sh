@@ -1,10 +1,11 @@
 #!/bin/bash
 set -e
 
-# --- Firewall & Sensor Installer (v8.5) ---
-# - LISTS: Exact user-provided list set (32 Sources)
-# - FIX: Safe Plugin Handling (Only removes 'dummy', updates Hub)
-# - REMOVED: HoneyDB completely
+# --- Firewall & Sensor Installer (v9.0) ---
+# - COMPLIANCE: Aligned with CrowdSec Official Docs
+# - FIX: Ensures crowdsec-firewall-bouncer-iptables is present
+# - FIX: Safe YAML handling (Ensures newlines)
+# - LISTS: Full 32 User Sources
 
 # --- CONFIGURATION MAPPING ---
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-}"
@@ -16,11 +17,10 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v8.5)      "
+echo "   FIREWALL & CROWDSEC INSTALLER (v9.0)      "
 echo "============================================="
 
-# --- 1. YOUR EXACT LIST SET ---
-# Based on provided requirements 
+# --- 1. USER LIST SET (32 Sources) ---
 DEFAULT_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
@@ -77,26 +77,24 @@ fi
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
-# Auto-install logic
 if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
     echo ">>> 2. SETTING UP CROWDSEC..."
     
+    # Repo Setup & Install
     if [[ "$CS_INSTALLED" == "false" ]]; then
         if [ -f /etc/debian_version ]; then
             curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash 2>/dev/null
-            apt-get install -y crowdsec
+            apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables
         elif [ -f /etc/redhat-release ]; then
             curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.rpm.sh | bash 2>/dev/null
-            yum install -y crowdsec
+            yum install -y crowdsec crowdsec-firewall-bouncer-iptables
         fi
     fi
 
-    # --- SAFE PLUGIN CHECK ---
-    # Only remove dummy. Do NOT rename valid plugins (slack, http, etc.)
-    if [[ -f "/usr/lib/crowdsec/plugins/dummy" ]]; then
-        rm -f /usr/lib/crowdsec/plugins/dummy
-    fi
-    # Update Hub to ensure plugins are valid
+    # Cleanup known bad plugins (only dummy)
+    if [[ -f "/usr/lib/crowdsec/plugins/dummy" ]]; then rm -f /usr/lib/crowdsec/plugins/dummy; fi
+    
+    # Update Hub
     if command -v cscli >/dev/null; then
         cscli hub update >/dev/null 2>&1 || true
         cscli notifications update >/dev/null 2>&1 || true
@@ -108,7 +106,7 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         cscli console enroll "$CS_ENROLL" --overwrite || true
     fi
 
-    # AbuseIPDB Config
+    # AbuseIPDB Config (Safe YAML)
     if [[ -n "$ABUSE_KEY" ]]; then
         mkdir -p /etc/crowdsec/notifications
         cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
@@ -129,7 +127,7 @@ headers:
   Accept: application/json
 YAML
 
-        # Add to profile safely
+        # Add to profile (Idempotent)
         if ! grep -q "abuseipdb" /etc/crowdsec/profiles.yaml 2>/dev/null; then
             cat <<YAML > /etc/crowdsec/profiles.yaml
 name: default_ip_remediation
@@ -146,14 +144,15 @@ YAML
         fi
     fi
 
-    # Install Bouncer
-    if ! command -v crowdsec-firewall-bouncer >/dev/null; then
-        if command -v apt-get >/dev/null; then apt-get install -y crowdsec-firewall-bouncer-iptables; 
-        else yum install -y crowdsec-firewall-bouncer-iptables; fi
+    # Validate & Restart
+    if command -v crowdsec >/dev/null; then
+        if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
+            systemctl restart crowdsec
+            systemctl enable --now crowdsec-firewall-bouncer || true
+        else
+            echo "⚠️ Config check failed. Skipping restart to avoid downtime."
+        fi
     fi
-    
-    systemctl restart crowdsec || echo "⚠️ CrowdSec restart check needed."
-    systemctl restart crowdsec-firewall-bouncer || true
 fi
 
 # --- 5. INSTALL UPDATER SCRIPT ---
@@ -164,13 +163,11 @@ CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists"
 mkdir -p "$CONF_DIR/backups"
 
-# Download Main Script
 curl -sfL "https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/update-firewall-blocklists.sh" -o "$INSTALL_DIR/update-firewall-blocklists.sh"
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
 
-# Create Source List (Using YOUR exact lists)
+# Create Source List (Using 32 Lists)
 : > "$CONF_DIR/firewall-blocklists/blocklist.sources"
-# If headless or no customization requested, use all defaults
 for entry in "${DEFAULT_LISTS[@]}"; do
     echo "${entry#*|}" >> "$CONF_DIR/firewall-blocklists/blocklist.sources"
 done

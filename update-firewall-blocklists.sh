@@ -4,13 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v8.7"
+SCRIPT_VERSION="v8.9"
 
 #################################################
-# Firewall Blocklist Updater (v8.7 - YAML Fix)
-# - FIX: Safe YAML appending for Sensors (No more echo -e)
+# Firewall Blocklist Updater (v8.9 - Stability)
+# - FIX: Enforces newline before appending to YAML
 # - FIX: Prevents crash on empty lists (grep || true)
-# - LISTS: Full 32 Sources (Synced with Installer v8.5)
+# - LISTS: Full 32 Sources 
 #################################################
 
 # --- Constants ---
@@ -29,7 +29,7 @@ MAX_LOG_SIZE=$((5 * 1024 * 1024))
 DRY_RUN=0
 IPV6_ENABLED=1
 
-# --- Lists (Full Sync with Installer v8.5) ---
+# --- Lists (Full Sync) ---
 RECOMMENDED_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
@@ -167,12 +167,14 @@ install_sensors() {
         cscli collections install crowdsecurity/endlessh --force >/dev/null 2>&1 || true
         cscli collections install crowdsecurity/iptables --force >/dev/null 2>&1 || true
         
-        # CRITICAL FIX v8.7: Use safe YAML appending with separator
         if ! grep -q "type: endlessh" /etc/crowdsec/acquis.yaml 2>/dev/null; then
             echo " -> Adding Sensor config to CrowdSec..."
+            # Backup
+            cp /etc/crowdsec/acquis.yaml /etc/crowdsec/acquis.yaml.bak 2>/dev/null || true
             
-            # Add separator if file not empty
-            if [[ -s /etc/crowdsec/acquis.yaml ]]; then echo "---" >> /etc/crowdsec/acquis.yaml; fi
+            # CRITICAL FIX v8.9: Force newline before separator
+            echo "" >> /etc/crowdsec/acquis.yaml
+            echo "---" >> /etc/crowdsec/acquis.yaml
             
             cat <<YAML >> /etc/crowdsec/acquis.yaml
 filenames:
@@ -181,9 +183,16 @@ filenames:
 labels:
   type: endlessh
 YAML
-            systemctl restart crowdsec
+            # Validate before restart
+            if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
+                systemctl restart crowdsec
+                echo "✅ Sensors Configured."
+            else
+                echo "❌ Config invalid. Rolling back..."
+                mv /etc/crowdsec/acquis.yaml.bak /etc/crowdsec/acquis.yaml 2>/dev/null || true
+                systemctl restart crowdsec
+            fi
         fi
-        echo "✅ Sensors Configured."
     fi
 }
 
@@ -342,7 +351,6 @@ main() {
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
 
-  # Filter
   grep -vE "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)" "$TMPDIR/bl.v4" | sort -u | comm -23 - <(sort -u "$TMPDIR/wl.v4") > "$TMPDIR/bl_final.v4" || true
   sort -u "$TMPDIR/bl.v6" | comm -23 - <(sort -u "$TMPDIR/wl.v6") > "$TMPDIR/bl_final.v6" || true
 
@@ -356,7 +364,6 @@ main() {
       if [[ $IPV6_ENABLED -eq 1 ]]; then
           command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP; }
       fi
-      # Logging for sensors
       if command -v crowdsec >/dev/null; then
           iptables -C INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " 2>/dev/null || \
           iptables -A INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " --log-level 4
