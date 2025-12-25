@@ -4,13 +4,12 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v8.0"
+SCRIPT_VERSION="v8.1"
 
 #################################################
-# Firewall Blocklist Updater (v8.0 - Clean Stable)
-# - REMOVED: HoneyDB (Deprecated/Unstable)
-# - CORE: Safe Config Loading (Ignores old HoneyDB keys)
-# - CORE: Browser User-Agent (Fixes GreenSnow blocking)
+# Firewall Blocklist Updater (v8.1 - HoneyDB Purged)
+# - REMOVED: All HoneyDB API references, keys & logic
+# - CORE: Safe Config Loading & Browser User-Agent
 # - FEAT: Full Sensor Suite (Endlessh + CrowdSec)
 #################################################
 
@@ -66,7 +65,6 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Init ---
-# Mimic a real browser to prevent 403 Forbidden
 CURL_OPTS="-sfL --connect-timeout 20 --retry 2 -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'"
 if curl --help | grep -q -- "--compressed"; then CURL_OPTS="$CURL_OPTS --compressed"; fi
 
@@ -102,7 +100,7 @@ load_env_vars() {
         
         val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
         
-        # Explicit Whitelist of allowed vars (HoneyDB removed here)
+        # Explicit Whitelist (HoneyDB completely removed)
         case "$key" in
             WHITELIST_COUNTRIES|BLOCKLIST_COUNTRIES|DYNDNS_HOST|ABUSEIPDB_API_KEY|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID)
                 printf -v "$key" "%s" "$val"
@@ -376,7 +374,7 @@ download_parallel() {
     u="{}"; f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
     if curl '"$CURL_OPTS"' "$u" -o "$TMPDIR/$f" || true; then
         if [[ -s "$TMPDIR/$f" ]]; then
-            # New HTML Check
+            # HTML Check
             if head -n 1 "$TMPDIR/$f" | grep -qiE "<!DOCTYPE|<html"; then
                 echo "[WARNING] Download dropped (HTML detected): $u" >&2
                 rm "$TMPDIR/$f"
@@ -489,7 +487,6 @@ main() {
   : > "$TMPDIR/wl_raw.lst"
   local wl=(); [[ -f "$CONFIG_DIR/whitelist.sources" ]] && mapfile -t wl < <(grep -vE '^\s*#' "$CONFIG_DIR/whitelist.sources" || true)
   
-  # STRICT VALIDATION: Ensure c is only 2 letters
   for c in $WHITELIST_COUNTRIES; do 
       if [[ "$c" =~ ^[a-zA-Z]{2}$ ]]; then
           wl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset")
@@ -511,8 +508,6 @@ main() {
       fi
   done
   download_parallel "$TMPDIR/bl_raw.lst" "${bl[@]}"
-
-  # HoneyDB REMOVED
 
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
