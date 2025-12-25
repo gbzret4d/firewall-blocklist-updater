@@ -4,7 +4,14 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v9.0"
+SCRIPT_VERSION="v9.1"
+
+#################################################
+# Firewall Blocklist Updater (v9.1 - Ipset Fix)
+# - FIX: Ensures IPSet ALWAYS exists (prevents iptables crash)
+# - FIX: Safe YAML appending
+# - LISTS: Full 32 Sources
+#################################################
 
 # --- Constants ---
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -266,9 +273,16 @@ extract_ips() {
 
 load_ipset() {
   local file="$1"; local setname="$2"; local family="$3"
-  if [[ ! -s "$file" ]]; then return 0; fi
+  # FIX: Always create set to satisfy iptables, even if file is empty
   if [[ "$family" == "inet6" && $IPV6_ENABLED -eq 0 ]]; then return 0; fi
   ipset create $setname hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist 2>/dev/null || true
+  
+  if [[ ! -s "$file" ]]; then
+      # If empty file, flush set to ensure it's empty
+      ipset flush $setname 2>/dev/null || true
+      return 0
+  fi
+  
   ipset flush "${setname}_tmp" 2>/dev/null || ipset create "${setname}_tmp" hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist
   sed "s/^/add ${setname}_tmp /" "$file" | ipset restore -!
   ipset swap "${setname}_tmp" "$setname"

@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-# --- Firewall & Sensor Installer (v9.1) ---
-# - FIX: Auto-removes install.sh/dummy from plugin dir (Fixes "invalid plugin" crash)
-# - FIX: Validates Config before restart
+# --- Firewall & Sensor Installer (v9.2) ---
+# - FIX: Ensures consistent CrowdSec Config
+# - FIX: Plugin Auto-Cleanup (Fixes "invalid plugin" crash)
 # - LISTS: Full 32 User Sources
 
 # --- CONFIGURATION MAPPING ---
@@ -16,7 +16,7 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v9.1)      "
+echo "   FIREWALL & CROWDSEC INSTALLER (v9.2)      "
 echo "============================================="
 
 # --- 1. USER LIST SET ---
@@ -89,8 +89,7 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         fi
     fi
 
-    # --- CRITICAL FIX: CLEANUP PLUGIN DIR ---
-    # Removes debris that causes startup crashes
+    # CLEANUP PLUGINS (Self-Correction)
     if [[ -d "/usr/lib/crowdsec/plugins" ]]; then
         rm -f /usr/lib/crowdsec/plugins/dummy
         rm -f /usr/lib/crowdsec/plugins/install.sh
@@ -146,13 +145,7 @@ YAML
         fi
     fi
 
-    # Install Bouncer
-    if ! command -v crowdsec-firewall-bouncer >/dev/null; then
-        if command -v apt-get >/dev/null; then apt-get install -y crowdsec-firewall-bouncer-iptables; 
-        else yum install -y crowdsec-firewall-bouncer-iptables; fi
-    fi
-    
-    # Check Config & Restart
+    # Check & Restart
     if command -v crowdsec >/dev/null; then
         if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
             systemctl restart crowdsec
@@ -174,13 +167,11 @@ mkdir -p "$CONF_DIR/backups"
 curl -sfL "https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/update-firewall-blocklists.sh" -o "$INSTALL_DIR/update-firewall-blocklists.sh"
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
 
-# Create Source List
 : > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 for entry in "${DEFAULT_LISTS[@]}"; do
     echo "${entry#*|}" >> "$CONF_DIR/firewall-blocklists/blocklist.sources"
 done
 
-# Create Config File
 cat <<ENV > "$CONF_DIR/firewall-blocklist-keys.env"
 ABUSEIPDB_API_KEY="$ABUSE_KEY"
 DYNDNS_HOST="$DYNDNS"
