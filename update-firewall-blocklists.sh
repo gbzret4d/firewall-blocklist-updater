@@ -4,14 +4,7 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v8.9"
-
-#################################################
-# Firewall Blocklist Updater (v8.9 - Stability)
-# - FIX: Enforces newline before appending to YAML
-# - FIX: Prevents crash on empty lists (grep || true)
-# - LISTS: Full 32 Sources 
-#################################################
+SCRIPT_VERSION="v9.0"
 
 # --- Constants ---
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -65,7 +58,6 @@ RECOMMENDED_LISTS=(
     "MyIP (FireHOL)|https://iplists.firehol.org/files/myip.ipset"
 )
 
-# --- Logging ---
 manage_log_size() {
     if [[ -f "$LOGFILE" ]]; then
         local size=$(stat -c%s "$LOGFILE" 2>/dev/null || stat -f%z "$LOGFILE" 2>/dev/null || echo 0)
@@ -76,12 +68,9 @@ log() { echo -e "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $*" | tee -a "$LOGFILE"; }
 warn() { echo -e "\033[0;33m$(date '+%Y-%m-%d %H:%M:%S') [WARN] $*\033[0m" | tee -a "$LOGFILE"; }
 dry() { echo -e "\033[0;36m[DRY-RUN] $*\033[0m"; }
 
-cleanup() {
-    rm -f "$LOCKFILE" /tmp/firewall-blocklists/* 2>/dev/null || true
-}
+cleanup() { rm -f "$LOCKFILE" /tmp/firewall-blocklists/* 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
-# --- Init ---
 CURL_OPTS="-sfL --connect-timeout 20 --retry 2 -A 'Mozilla/5.0 (X11; Linux x86_64)'"
 if curl --help | grep -q -- "--compressed"; then CURL_OPTS="$CURL_OPTS --compressed"; fi
 
@@ -94,21 +83,12 @@ check_ipv6_stack() {
     return 0
 }
 
-# --- Safe Loading ---
-WHITELIST_COUNTRIES=""
-BLOCKLIST_COUNTRIES=""
-DYNDNS_HOST=""
-ABUSEIPDB_API_KEY=""
-TELEGRAM_BOT_TOKEN=""
-TELEGRAM_CHAT_ID=""
+WHITELIST_COUNTRIES=""; BLOCKLIST_COUNTRIES=""; DYNDNS_HOST=""
+ABUSEIPDB_API_KEY=""; TELEGRAM_BOT_TOKEN=""; TELEGRAM_CHAT_ID=""
 
 load_env_vars() {
   if [[ -f "$KEYFILE" ]]; then
-    set +u
-    set -a
-    source "$KEYFILE"
-    set +a
-    set -u
+    set +u; set -a; source "$KEYFILE"; set +a; set -u
     WHITELIST_COUNTRIES=$(echo "${WHITELIST_COUNTRIES:-}" | tr -cd 'A-Za-z ')
     BLOCKLIST_COUNTRIES=$(echo "${BLOCKLIST_COUNTRIES:-}" | tr -cd 'A-Za-z ')
   fi
@@ -142,7 +122,6 @@ send_telegram() {
     fi
 }
 
-# --- SENSOR SETUP ---
 install_sensors() {
     echo ">>> Installing Sensors..."
     if ss -tuln | grep -q ":2222 "; then 
@@ -169,13 +148,8 @@ install_sensors() {
         
         if ! grep -q "type: endlessh" /etc/crowdsec/acquis.yaml 2>/dev/null; then
             echo " -> Adding Sensor config to CrowdSec..."
-            # Backup
             cp /etc/crowdsec/acquis.yaml /etc/crowdsec/acquis.yaml.bak 2>/dev/null || true
-            
-            # CRITICAL FIX v8.9: Force newline before separator
-            echo "" >> /etc/crowdsec/acquis.yaml
-            echo "---" >> /etc/crowdsec/acquis.yaml
-            
+            if [[ -s /etc/crowdsec/acquis.yaml ]]; then echo "---" >> /etc/crowdsec/acquis.yaml; fi
             cat <<YAML >> /etc/crowdsec/acquis.yaml
 filenames:
   - /var/log/syslog
@@ -183,7 +157,6 @@ filenames:
 labels:
   type: endlessh
 YAML
-            # Validate before restart
             if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
                 systemctl restart crowdsec
                 echo "✅ Sensors Configured."
@@ -196,7 +169,6 @@ YAML
     fi
 }
 
-# --- MENUS ---
 menu_geo() {
     echo -e "\n--- 🌍 Geo-Blocking Settings ---"
     read -p "Whitelist Countries (e.g. DE AT): " wl
@@ -215,7 +187,6 @@ menu_lists() {
     for entry in "${RECOMMENDED_LISTS[@]}"; do
         local name="${entry%%|*}"
         local url="${entry#*|}"
-
         if echo "$current_content" | grep -Fq "$url"; then
             read -p "$(echo -e "[\033[1;32mx\033[0m] $name") - Keep? (Y/n): " yn
             if [[ ! "$yn" =~ ^[Nn]$ ]]; then new_content+="$url"$'\n'; fi
@@ -224,8 +195,7 @@ menu_lists() {
             if [[ "$yn" =~ ^[Yy]$ ]]; then new_content+="$url"$'\n'; fi
         fi
     done
-    echo "$new_content" > "$SOURCE_FILE"
-    echo "✅ Selection saved."
+    echo "$new_content" > "$SOURCE_FILE"; echo "✅ Selection saved."
 }
 
 interactive_menu() {
@@ -248,7 +218,6 @@ interactive_menu() {
     done
 }
 
-# --- Core Logic ---
 TMPDIR="/tmp/firewall-blocklists"
 IPSET_WL="allowed_whitelist"; IPSET_BL="blocklist_all"
 IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000

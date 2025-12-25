@@ -1,10 +1,9 @@
 #!/bin/bash
 set -e
 
-# --- Firewall & Sensor Installer (v9.0) ---
-# - COMPLIANCE: Aligned with CrowdSec Official Docs
-# - FIX: Ensures crowdsec-firewall-bouncer-iptables is present
-# - FIX: Safe YAML handling (Ensures newlines)
+# --- Firewall & Sensor Installer (v9.1) ---
+# - FIX: Auto-removes install.sh/dummy from plugin dir (Fixes "invalid plugin" crash)
+# - FIX: Validates Config before restart
 # - LISTS: Full 32 User Sources
 
 # --- CONFIGURATION MAPPING ---
@@ -17,10 +16,10 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v9.0)      "
+echo "   FIREWALL & CROWDSEC INSTALLER (v9.1)      "
 echo "============================================="
 
-# --- 1. USER LIST SET (32 Sources) ---
+# --- 1. USER LIST SET ---
 DEFAULT_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
@@ -80,7 +79,6 @@ if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
     echo ">>> 2. SETTING UP CROWDSEC..."
     
-    # Repo Setup & Install
     if [[ "$CS_INSTALLED" == "false" ]]; then
         if [ -f /etc/debian_version ]; then
             curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash 2>/dev/null
@@ -91,10 +89,14 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         fi
     fi
 
-    # Cleanup known bad plugins (only dummy)
-    if [[ -f "/usr/lib/crowdsec/plugins/dummy" ]]; then rm -f /usr/lib/crowdsec/plugins/dummy; fi
+    # --- CRITICAL FIX: CLEANUP PLUGIN DIR ---
+    # Removes debris that causes startup crashes
+    if [[ -d "/usr/lib/crowdsec/plugins" ]]; then
+        rm -f /usr/lib/crowdsec/plugins/dummy
+        rm -f /usr/lib/crowdsec/plugins/install.sh
+        rm -f /usr/lib/crowdsec/plugins/update-firewall-blocklists.sh
+    fi
     
-    # Update Hub
     if command -v cscli >/dev/null; then
         cscli hub update >/dev/null 2>&1 || true
         cscli notifications update >/dev/null 2>&1 || true
@@ -106,7 +108,7 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         cscli console enroll "$CS_ENROLL" --overwrite || true
     fi
 
-    # AbuseIPDB Config (Safe YAML)
+    # AbuseIPDB Config
     if [[ -n "$ABUSE_KEY" ]]; then
         mkdir -p /etc/crowdsec/notifications
         cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
@@ -127,7 +129,7 @@ headers:
   Accept: application/json
 YAML
 
-        # Add to profile (Idempotent)
+        # Add to profile
         if ! grep -q "abuseipdb" /etc/crowdsec/profiles.yaml 2>/dev/null; then
             cat <<YAML > /etc/crowdsec/profiles.yaml
 name: default_ip_remediation
@@ -144,13 +146,19 @@ YAML
         fi
     fi
 
-    # Validate & Restart
+    # Install Bouncer
+    if ! command -v crowdsec-firewall-bouncer >/dev/null; then
+        if command -v apt-get >/dev/null; then apt-get install -y crowdsec-firewall-bouncer-iptables; 
+        else yum install -y crowdsec-firewall-bouncer-iptables; fi
+    fi
+    
+    # Check Config & Restart
     if command -v crowdsec >/dev/null; then
         if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
             systemctl restart crowdsec
             systemctl enable --now crowdsec-firewall-bouncer || true
         else
-            echo "⚠️ Config check failed. Skipping restart to avoid downtime."
+            echo "⚠️ CrowdSec config invalid. Skipping restart."
         fi
     fi
 fi
@@ -166,7 +174,7 @@ mkdir -p "$CONF_DIR/backups"
 curl -sfL "https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/update-firewall-blocklists.sh" -o "$INSTALL_DIR/update-firewall-blocklists.sh"
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
 
-# Create Source List (Using 32 Lists)
+# Create Source List
 : > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 for entry in "${DEFAULT_LISTS[@]}"; do
     echo "${entry#*|}" >> "$CONF_DIR/firewall-blocklists/blocklist.sources"
