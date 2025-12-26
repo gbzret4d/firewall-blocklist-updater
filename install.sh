@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
 
-# --- Firewall & Sensor Installer (v10.1) ---
-# - FIX: Deep Clean of Plugin Directory before start
-# - FIX: Validates CrowdSec Config before restart
-# - LISTS: Full 32 User Sources
+# --- Firewall & Sensor Installer (v10.5) ---
+# - FIX: Boot Persistence (Firewall loads immediately on reboot)
+# - FIX: APT Lock Wait (Prevents crash if auto-updates are running)
+# - FIX: Deep Clean & Config Validation
 
 # --- CONFIGURATION MAPPING ---
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-}"
@@ -16,7 +16,7 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v10.1)     "
+echo "   FIREWALL & CROWDSEC INSTALLER (v10.5)     "
 echo "============================================="
 
 # --- 1. USER LIST SET ---
@@ -60,16 +60,24 @@ if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
 
 # --- 3. PREPARING ENVIRONMENT ---
 echo ">>> 1. INSTALLING DEPENDENCIES..."
+
+# FIX: Robust APT Lock Wait
+wait_for_apt() {
+    while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        echo "⏳ Waiting for other package managers to finish..."
+        sleep 2
+    done
+}
+
 if command -v apt-get >/dev/null; then
-    while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
+    wait_for_apt
     apt-get update -qq
+    wait_for_apt
     apt-get install -y curl ipset iptables dnsutils unzip file gnupg iproute2
 elif command -v dnf >/dev/null; then
     dnf install -y curl ipset iptables bind-utils unzip file iproute
 elif command -v yum >/dev/null; then
     yum install -y curl ipset iptables bind-utils unzip file iproute
-elif command -v zypper >/dev/null; then
-    zypper install -y curl ipset iptables bind-utils unzip file iproute2
 fi
 
 # --- 4. CROWDSEC INSTALLATION ---
@@ -82,6 +90,7 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
     if [[ "$CS_INSTALLED" == "false" ]]; then
         if [ -f /etc/debian_version ]; then
             curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash 2>/dev/null
+            wait_for_apt
             apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables
         elif [ -f /etc/redhat-release ]; then
             curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.rpm.sh | bash 2>/dev/null
@@ -147,7 +156,9 @@ YAML
 
     # Install Bouncer
     if ! command -v crowdsec-firewall-bouncer >/dev/null; then
-        if command -v apt-get >/dev/null; then apt-get install -y crowdsec-firewall-bouncer-iptables; 
+        if command -v apt-get >/dev/null; then 
+            wait_for_apt
+            apt-get install -y crowdsec-firewall-bouncer-iptables; 
         else yum install -y crowdsec-firewall-bouncer-iptables; fi
     fi
     
@@ -190,7 +201,7 @@ TELEGRAM_CHAT_ID="$TG_CHAT"
 ENV
 chmod 600 "$CONF_DIR/firewall-blocklist-keys.env"
 
-# --- 6. SYSTEMD SETUP ---
+# --- 6. SYSTEMD SETUP (BOOT PERSISTENCE) ---
 cat <<SERV > /etc/systemd/system/firewall-blocklist-updater.service
 [Unit]
 Description=Firewall Blocklist Updater
@@ -200,6 +211,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=$INSTALL_DIR/update-firewall-blocklists.sh
+
+[Install]
+WantedBy=multi-user.target
 SERV
 
 cat <<TIME > /etc/systemd/system/firewall-blocklist-updater.timer
@@ -216,6 +230,8 @@ WantedBy=timers.target
 TIME
 
 systemctl daemon-reload
+# Enable Service (runs on boot) AND Timer (runs hourly)
+systemctl enable --now firewall-blocklist-updater.service
 systemctl enable --now firewall-blocklist-updater.timer
 
 # --- 7. INITIAL RUN ---

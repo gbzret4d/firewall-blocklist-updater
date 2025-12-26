@@ -4,13 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v10.4"
+SCRIPT_VERSION="v10.5"
 
 #################################################
-# Firewall Blocklist Updater (v10.4 - Auto-Repair)
-# - FIX: Auto-Repairs Hostname issues in /etc/hosts
-# - FIX: Factory Reset for CrowdSec if config fails
-# - FIX: Disables Socket to allow Service to bind
+# Firewall Blocklist Updater (v10.5 - Safety Net)
+# - FEAT: Safety Check: Aborts if < 10,000 IPs found (prevents fail-open)
+# - FIX: Auto-Repairs Hostname & Socket Conflicts
+# - FIX: Dynamic Port Scan
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -127,14 +127,14 @@ send_telegram() {
 
 # --- SYSTEM AUTO REPAIR ---
 repair_environment() {
-    # 1. FIX HOSTNAME (prevents sudo warnings)
+    # 1. FIX HOSTNAME
     local HN=$(hostname)
     if ! grep -q "127.0.1.1 $HN" /etc/hosts; then
         echo "127.0.1.1 $HN" >> /etc/hosts
         log "🔧 Fixed missing hostname in /etc/hosts"
     fi
 
-    # 2. DISABLE SOCKET (Fixes Endlessh conflict)
+    # 2. DISABLE SOCKET
     if systemctl is-active --quiet endlessh.socket || systemctl is-enabled --quiet endlessh.socket; then
         systemctl stop endlessh.socket 2>/dev/null || true
         systemctl disable endlessh.socket 2>/dev/null || true
@@ -219,7 +219,6 @@ labels:
   type: endlessh
 YAML
             
-            # --- AGGRESSIVE CLEANUP BEFORE START ---
             rm -f /usr/lib/crowdsec/plugins/* 2>/dev/null || true
 
             if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
@@ -228,7 +227,6 @@ YAML
             else
                 echo "❌ Config invalid. Starting EMERGENCY REPAIR..."
                 
-                # --- FACTORY RESET CROWDSEC CONFIG ---
                 rm -f /usr/lib/crowdsec/plugins/* 2>/dev/null || true
                 cat <<YAML_CLEAN > /etc/crowdsec/acquis.yaml
 filenames:
@@ -313,7 +311,6 @@ IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
 
 get_set_count() { ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
 
-# --- ROBUST EXTRACTION ---
 smart_extract() {
     local f="$1"
     if gzip -t "$f" 2>/dev/null; then zcat "$f"; elif unzip -t "$f" 2>/dev/null; then unzip -p "$f"; else cat "$f"; fi
@@ -421,6 +418,14 @@ main() {
   for c in $BLOCKLIST_COUNTRIES; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
   
   download_lists "$TMPDIR/bl_raw.lst" "${bl[@]}"
+  
+  # --- SAFETY CHECK: LIST SIZE ---
+  local line_count=$(wc -l < "$TMPDIR/bl_raw.lst" || echo 0)
+  if [[ $line_count -lt 10000 ]]; then
+      warn "⚠️ SAFETY STOP: Only $line_count IPs found in lists. Keeping old rules to prevent fail-open."
+      if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then send_telegram "⚠️ Update Skipped: Too few IPs ($line_count)"; fi
+      exit 0
+  fi
   
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"
   extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
