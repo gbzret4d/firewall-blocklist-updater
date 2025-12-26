@@ -6,14 +6,6 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # --- VERSION CONTROL ---
 SCRIPT_VERSION="v9.9"
 
-#################################################
-# Firewall Blocklist Updater (v9.9 - Smart Port)
-# - FIX: Smart Port Check: Only kills endlessh on 2222.
-# - FEAT: Fallback to Port 22222 if 2222 is busy by other app.
-# - FIX: Robust extraction & IPSet handling.
-# - LISTS: Full 32 Sources.
-#################################################
-
 # --- Constants ---
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="$BASE_DIR/firewall-blocklists"
@@ -26,12 +18,11 @@ LOCKFILE="/var/run/firewall-updater.lock"
 LOGFILE="/var/log/firewall-blocklist-updater.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 
-# --- Globals ---
 DRY_RUN=0
 IPV6_ENABLED=1
 USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-# --- Lists (Full Sync) ---
+# --- 32 Sources ---
 RECOMMENDED_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
@@ -89,9 +80,6 @@ check_ipv6_stack() {
     return 0
 }
 
-WHITELIST_COUNTRIES=""; BLOCKLIST_COUNTRIES=""; DYNDNS_HOST=""
-ABUSEIPDB_API_KEY=""; TELEGRAM_BOT_TOKEN=""; TELEGRAM_CHAT_ID=""
-
 load_env_vars() {
   if [[ -f "$KEYFILE" ]]; then
     set +u; set -a; source "$KEYFILE"; set +a; set -u
@@ -134,30 +122,20 @@ install_sensors() {
     local EL_PORT=2222
     local FALLBACK_PORT=22222
 
-    # --- SMART PORT CHECK ---
-    # Check if primary port is busy
     if ss -tuln | grep -q ":$EL_PORT "; then
-        # Find PID occupying the port
         local PID=$(ss -lptn "sport = :$EL_PORT" | grep -o 'pid=[0-9]*' | cut -d= -f2 | head -n1 || true)
         local PNAME=""
-        
-        if [[ -n "$PID" ]]; then
-            PNAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "unknown")
-        fi
+        if [[ -n "$PID" ]]; then PNAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "unknown"); fi
 
         if [[ "$PNAME" == "endlessh" ]]; then
-            # It's our service, restart safe
             log "Port $EL_PORT is occupied by old endlessh (PID $PID). Killing for restart..."
-            kill "$PID" 2>/dev/null || true
-            sleep 1
+            kill "$PID" 2>/dev/null || true; sleep 1
         else
-            # It's something else! Do NOT kill. Switch port.
             warn "Port $EL_PORT is occupied by '$PNAME'. Switching Endlessh to port $FALLBACK_PORT."
             EL_PORT=$FALLBACK_PORT
         fi
     fi
 
-    # Install Package
     if ! command -v endlessh >/dev/null; then
         if command -v apt-get >/dev/null; then apt-get update -qq && apt-get install -y endlessh
         elif command -v yum >/dev/null; then yum install -y endlessh; fi
@@ -165,13 +143,11 @@ install_sensors() {
 
     mkdir -p /etc/endlessh
     if [[ -d /etc/endlessh ]]; then
-        # Write config with dynamic port
         echo "Port $EL_PORT" > /etc/endlessh/config
         echo "Delay 10000" >> /etc/endlessh/config
         echo "LogLevel 1" >> /etc/endlessh/config
         echo "BindFamily 0" >> /etc/endlessh/config
         
-        # Ensure capability to bind ports (just in case)
         local SVC="/lib/systemd/system/endlessh.service"
         if [[ -f "$SVC" ]]; then
             if ! grep -q "AmbientCapabilities" "$SVC"; then
@@ -180,9 +156,8 @@ install_sensors() {
             fi
         fi
         
-        # Try Start
         if ! systemctl enable --now endlessh; then
-            warn "Endlessh failed to start on port $EL_PORT. Check 'systemctl status endlessh'."
+            warn "Endlessh failed to start on port $EL_PORT."
         else
             systemctl restart endlessh
             log "✅ Endlessh running on port $EL_PORT"
@@ -271,7 +246,6 @@ IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
 
 get_set_count() { ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
 
-# --- EXTRACTION ---
 smart_extract() {
     local f="$1"
     if gzip -t "$f" 2>/dev/null; then zcat "$f"; elif unzip -t "$f" 2>/dev/null; then unzip -p "$f"; else cat "$f"; fi
