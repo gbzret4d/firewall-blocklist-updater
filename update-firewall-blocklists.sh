@@ -4,7 +4,14 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v9.9"
+SCRIPT_VERSION="v10.0"
+
+#################################################
+# Firewall Blocklist Updater (v10.0 - Infinity Loop)
+# - FIX: Dynamic Port Scanner (Tries ports 2222->2232)
+# - FIX: Robust Extraction & Filtering
+# - LISTS: Full 32 Sources
+#################################################
 
 # --- Constants ---
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -18,11 +25,12 @@ LOCKFILE="/var/run/firewall-updater.lock"
 LOGFILE="/var/log/firewall-blocklist-updater.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 
+# --- Globals ---
 DRY_RUN=0
 IPV6_ENABLED=1
 USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-# --- 32 Sources ---
+# --- Lists (Full Sync) ---
 RECOMMENDED_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
@@ -119,21 +127,33 @@ send_telegram() {
 install_sensors() {
     echo ">>> Installing Sensors..."
     
-    local EL_PORT=2222
-    local FALLBACK_PORT=22222
-
-    if ss -tuln | grep -q ":$EL_PORT "; then
-        local PID=$(ss -lptn "sport = :$EL_PORT" | grep -o 'pid=[0-9]*' | cut -d= -f2 | head -n1 || true)
-        local PNAME=""
-        if [[ -n "$PID" ]]; then PNAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "unknown"); fi
-
-        if [[ "$PNAME" == "endlessh" ]]; then
-            log "Port $EL_PORT is occupied by old endlessh (PID $PID). Killing for restart..."
-            kill "$PID" 2>/dev/null || true; sleep 1
+    local EL_PORT=0
+    
+    # --- DYNAMIC PORT SCAN (2222 -> 2232) ---
+    for (( p=2222; p<=2232; p++ )); do
+        if ! ss -tuln | grep -q ":$p "; then
+            EL_PORT=$p
+            break
         else
-            warn "Port $EL_PORT is occupied by '$PNAME'. Switching Endlessh to port $FALLBACK_PORT."
-            EL_PORT=$FALLBACK_PORT
+            # Port busy. Check who.
+            local PID=$(ss -lptn "sport = :$p" | grep -o 'pid=[0-9]*' | cut -d= -f2 | head -n1 || true)
+            local PNAME=""
+            if [[ -n "$PID" ]]; then PNAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "unknown"); fi
+            
+            if [[ "$PNAME" == "endlessh" ]]; then
+                log "Port $p is occupied by old endlessh (PID $PID). Reusing..."
+                kill "$PID" 2>/dev/null || true; sleep 1
+                EL_PORT=$p
+                break
+            else
+                warn "Port $p busy by '$PNAME'. Trying next..."
+            fi
         fi
+    done
+
+    if [[ $EL_PORT -eq 0 ]]; then
+        warn "❌ ERROR: No free ports found between 2222-2232 for Endlessh!"
+        return 1
     fi
 
     if ! command -v endlessh >/dev/null; then
@@ -246,6 +266,7 @@ IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
 
 get_set_count() { ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
 
+# --- ROBUST EXTRACTION ---
 smart_extract() {
     local f="$1"
     if gzip -t "$f" 2>/dev/null; then zcat "$f"; elif unzip -t "$f" 2>/dev/null; then unzip -p "$f"; else cat "$f"; fi
@@ -261,7 +282,7 @@ download_lists() {
       local f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
       if [[ $DRY_RUN -eq 0 ]]; then echo -n "."; fi 
       
-      if curl -sL --fail --connect-timeout 10 --retry 1 -A "$USER_AGENT" "$u" -o "$TMPDIR/$f"; then
+      if curl -sfL --connect-timeout 10 --retry 1 -A "$USER_AGENT" "$u" -o "$TMPDIR/$f"; then
           if [[ -s "$TMPDIR/$f" ]]; then
               tr -d "\r" < "$TMPDIR/$f" > "$TMPDIR/$f.tmp" && mv "$TMPDIR/$f.tmp" "$TMPDIR/$f"
               if ! head -n 1 "$TMPDIR/$f" | grep -qiE "<!DOCTYPE|<html"; then
@@ -269,8 +290,6 @@ download_lists() {
                    echo "" >> "$TMPDIR/merge.lst"
               fi
           fi
-      else
-          if [[ $DRY_RUN -eq 0 ]]; then echo -n "x"; fi
       fi
   done
   if [[ $DRY_RUN -eq 0 ]]; then echo ""; fi

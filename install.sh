@@ -1,10 +1,12 @@
 #!/bin/bash
 set -e
 
-# --- Firewall & Sensor Installer (v9.3) ---
+# --- Firewall & Sensor Installer (v10.0) ---
 # - FIX: Deep Clean of Plugin Directory before start
+# - FIX: Validates CrowdSec Config before restart
 # - LISTS: Full 32 User Sources
 
+# --- CONFIGURATION MAPPING ---
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-}"
 CS_ENROLL="${CROWDSEC_ENROLL_KEY:-}"
 DYNDNS="${DYNDNS_HOST:-}"
@@ -14,9 +16,10 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v9.3)      "
+echo "   FIREWALL & CROWDSEC INSTALLER (v10.0)     "
 echo "============================================="
 
+# --- 1. USER LIST SET ---
 DEFAULT_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
@@ -52,8 +55,10 @@ DEFAULT_LISTS=(
     "MyIP (FireHOL)|https://iplists.firehol.org/files/myip.ipset"
 )
 
+# --- 2. SYSTEM CHECK ---
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
 
+# --- 3. PREPARING ENVIRONMENT ---
 echo ">>> 1. INSTALLING DEPENDENCIES..."
 if command -v apt-get >/dev/null; then
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
@@ -63,8 +68,11 @@ elif command -v dnf >/dev/null; then
     dnf install -y curl ipset iptables bind-utils unzip file iproute
 elif command -v yum >/dev/null; then
     yum install -y curl ipset iptables bind-utils unzip file iproute
+elif command -v zypper >/dev/null; then
+    zypper install -y curl ipset iptables bind-utils unzip file iproute2
 fi
 
+# --- 4. CROWDSEC INSTALLATION ---
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
@@ -93,11 +101,13 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         cscli notifications update >/dev/null 2>&1 || true
     fi
 
+    # Enroll
     if [[ -n "$CS_ENROLL" ]]; then
         echo " -> Enrolling..."
         cscli console enroll "$CS_ENROLL" --overwrite || true
     fi
 
+    # AbuseIPDB Config
     if [[ -n "$ABUSE_KEY" ]]; then
         mkdir -p /etc/crowdsec/notifications
         cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
@@ -117,6 +127,8 @@ headers:
   Content-Type: application/json
   Accept: application/json
 YAML
+
+        # Add to profile
         if ! grep -q "abuseipdb" /etc/crowdsec/profiles.yaml 2>/dev/null; then
             cat <<YAML > /etc/crowdsec/profiles.yaml
 name: default_ip_remediation
@@ -133,6 +145,13 @@ YAML
         fi
     fi
 
+    # Install Bouncer
+    if ! command -v crowdsec-firewall-bouncer >/dev/null; then
+        if command -v apt-get >/dev/null; then apt-get install -y crowdsec-firewall-bouncer-iptables; 
+        else yum install -y crowdsec-firewall-bouncer-iptables; fi
+    fi
+    
+    # Check Config & Restart
     if command -v crowdsec >/dev/null; then
         if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
             systemctl restart crowdsec
@@ -143,6 +162,7 @@ YAML
     fi
 fi
 
+# --- 5. INSTALL UPDATER SCRIPT ---
 echo ">>> 3. INSTALLING UPDATER..."
 INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -153,11 +173,13 @@ mkdir -p "$CONF_DIR/backups"
 curl -sfL "https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/update-firewall-blocklists.sh" -o "$INSTALL_DIR/update-firewall-blocklists.sh"
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
 
+# Create Source List
 : > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 for entry in "${DEFAULT_LISTS[@]}"; do
     echo "${entry#*|}" >> "$CONF_DIR/firewall-blocklists/blocklist.sources"
 done
 
+# Create Config File
 cat <<ENV > "$CONF_DIR/firewall-blocklist-keys.env"
 ABUSEIPDB_API_KEY="$ABUSE_KEY"
 DYNDNS_HOST="$DYNDNS"
@@ -168,6 +190,7 @@ TELEGRAM_CHAT_ID="$TG_CHAT"
 ENV
 chmod 600 "$CONF_DIR/firewall-blocklist-keys.env"
 
+# --- 6. SYSTEMD SETUP ---
 cat <<SERV > /etc/systemd/system/firewall-blocklist-updater.service
 [Unit]
 Description=Firewall Blocklist Updater
@@ -195,6 +218,7 @@ TIME
 systemctl daemon-reload
 systemctl enable --now firewall-blocklist-updater.timer
 
+# --- 7. INITIAL RUN ---
 echo ">>> 4. RUNNING INITIAL UPDATE..."
 $INSTALL_DIR/update-firewall-blocklists.sh
 
