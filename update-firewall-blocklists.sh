@@ -4,13 +4,14 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v9.7"
+SCRIPT_VERSION="v9.9"
 
 #################################################
-# Firewall Blocklist Updater (v9.7 - Fault Tolerant)
-# - FIX: Aggressive filtering of '::' IPv6 addresses
-# - FIX: 'ipset restore' failure no longer crashes the script
-# - LISTS: Full 32 Sources
+# Firewall Blocklist Updater (v9.9 - Smart Port)
+# - FIX: Smart Port Check: Only kills endlessh on 2222.
+# - FEAT: Fallback to Port 22222 if 2222 is busy by other app.
+# - FIX: Robust extraction & IPSet handling.
+# - LISTS: Full 32 Sources.
 #################################################
 
 # --- Constants ---
@@ -129,10 +130,34 @@ send_telegram() {
 
 install_sensors() {
     echo ">>> Installing Sensors..."
-    if ss -tuln | grep -q ":2222 "; then 
-        if ! pgrep -x "endlessh" >/dev/null; then echo "❌ Port 2222 in use!"; return 1; fi
+    
+    local EL_PORT=2222
+    local FALLBACK_PORT=22222
+
+    # --- SMART PORT CHECK ---
+    # Check if primary port is busy
+    if ss -tuln | grep -q ":$EL_PORT "; then
+        # Find PID occupying the port
+        local PID=$(ss -lptn "sport = :$EL_PORT" | grep -o 'pid=[0-9]*' | cut -d= -f2 | head -n1 || true)
+        local PNAME=""
+        
+        if [[ -n "$PID" ]]; then
+            PNAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "unknown")
+        fi
+
+        if [[ "$PNAME" == "endlessh" ]]; then
+            # It's our service, restart safe
+            log "Port $EL_PORT is occupied by old endlessh (PID $PID). Killing for restart..."
+            kill "$PID" 2>/dev/null || true
+            sleep 1
+        else
+            # It's something else! Do NOT kill. Switch port.
+            warn "Port $EL_PORT is occupied by '$PNAME'. Switching Endlessh to port $FALLBACK_PORT."
+            EL_PORT=$FALLBACK_PORT
+        fi
     fi
 
+    # Install Package
     if ! command -v endlessh >/dev/null; then
         if command -v apt-get >/dev/null; then apt-get update -qq && apt-get install -y endlessh
         elif command -v yum >/dev/null; then yum install -y endlessh; fi
@@ -140,11 +165,28 @@ install_sensors() {
 
     mkdir -p /etc/endlessh
     if [[ -d /etc/endlessh ]]; then
-        echo "Port 2222" > /etc/endlessh/config
+        # Write config with dynamic port
+        echo "Port $EL_PORT" > /etc/endlessh/config
         echo "Delay 10000" >> /etc/endlessh/config
         echo "LogLevel 1" >> /etc/endlessh/config
         echo "BindFamily 0" >> /etc/endlessh/config
-        systemctl enable --now endlessh; systemctl restart endlessh
+        
+        # Ensure capability to bind ports (just in case)
+        local SVC="/lib/systemd/system/endlessh.service"
+        if [[ -f "$SVC" ]]; then
+            if ! grep -q "AmbientCapabilities" "$SVC"; then
+                sed -i '/\[Service\]/a AmbientCapabilities=CAP_NET_BIND_SERVICE' "$SVC"
+                systemctl daemon-reload
+            fi
+        fi
+        
+        # Try Start
+        if ! systemctl enable --now endlessh; then
+            warn "Endlessh failed to start on port $EL_PORT. Check 'systemctl status endlessh'."
+        else
+            systemctl restart endlessh
+            log "✅ Endlessh running on port $EL_PORT"
+        fi
     fi
 
     if command -v cscli >/dev/null; then
@@ -270,7 +312,6 @@ extract_ips() {
         grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" | awk -F'[./]' '{valid=1; for(i=1;i<=4;i++)if($i>255)valid=0; if(NF>4&&$NF>32)valid=0; if(valid)print $0}' | grep -vE "^0\.0\.0\.0$" > "$output" || true
     else
         if [[ $IPV6_ENABLED -eq 1 ]]; then
-            # FIX v9.7: Aggressively filter anything starting with '::' (including ::/0)
             grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$input" | grep -vE "^::" > "$output" || true
         else touch "$output"; fi
     fi
@@ -288,7 +329,6 @@ load_ipset() {
   
   ipset flush "${setname}_tmp" 2>/dev/null || ipset create "${setname}_tmp" hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist
   
-  # FIX v9.7: Allow ipset restore to fail on individual lines without crashing script
   if ! sed "s/^/add ${setname}_tmp /" "$file" | ipset restore -! 2>/dev/null; then
       warn "Some IPs in $file were invalid and skipped by ipset (non-fatal)."
   fi
