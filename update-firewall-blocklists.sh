@@ -4,12 +4,12 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v10.1"
+SCRIPT_VERSION="v10.2"
 
 #################################################
-# Firewall Blocklist Updater (v10.1 - Self Healing)
-# - FIX: Aggressive Plugin Cleanup inside Updater (Fixes persistent crash)
-# - FIX: Enforced Newline in YAML generation
+# Firewall Blocklist Updater (v10.2 - Final Polish)
+# - FIX: Forces Endlessh to bind 0.0.0.0 (Fixes "unable to resolve host" crash)
+# - FIX: Self-Healing Plugin Cleanup
 # - FEAT: Dynamic Port Scanner
 # - LISTS: Full 32 Sources
 #################################################
@@ -166,7 +166,9 @@ install_sensors() {
         echo "Port $EL_PORT" > /etc/endlessh/config
         echo "Delay 10000" >> /etc/endlessh/config
         echo "LogLevel 1" >> /etc/endlessh/config
-        echo "BindFamily 0" >> /etc/endlessh/config
+        
+        # FIX v10.2: Explicitly bind to 0.0.0.0 to ignore broken hostnames
+        echo "BindFamily 4" >> /etc/endlessh/config
         
         local SVC="/lib/systemd/system/endlessh.service"
         if [[ -f "$SVC" ]]; then
@@ -192,7 +194,6 @@ install_sensors() {
             echo " -> Adding Sensor config to CrowdSec..."
             cp /etc/crowdsec/acquis.yaml /etc/crowdsec/acquis.yaml.bak 2>/dev/null || true
             
-            # FIX v10.1: Ensure Newline before separator to prevent YAML breakage
             echo "" >> /etc/crowdsec/acquis.yaml
             if [[ -s /etc/crowdsec/acquis.yaml ]]; then echo "---" >> /etc/crowdsec/acquis.yaml; fi
             
@@ -204,23 +205,19 @@ labels:
   type: endlessh
 YAML
             
-            # --- CRITICAL FIX v10.1: CLEANUP PLUGINS BEFORE RESTART ---
-            # Even if install.sh missed it, we scrub the folder to ensure valid startup.
+            # --- SELF-HEALING PLUGIN CLEANUP ---
             if [[ -d "/usr/lib/crowdsec/plugins" ]]; then
                 rm -f /usr/lib/crowdsec/plugins/dummy 2>/dev/null || true
                 rm -f /usr/lib/crowdsec/plugins/*.sh 2>/dev/null || true
                 rm -f /usr/lib/crowdsec/plugins/*.html 2>/dev/null || true
             fi
 
-            # Validate & Restart
             if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
                 systemctl restart crowdsec
                 echo "✅ Sensors Configured."
             else
                 echo "❌ Config invalid. Rolling back..."
                 mv /etc/crowdsec/acquis.yaml.bak /etc/crowdsec/acquis.yaml 2>/dev/null || true
-                
-                # Cleanup again before fallback restart
                 if [[ -d "/usr/lib/crowdsec/plugins" ]]; then
                     rm -f /usr/lib/crowdsec/plugins/*.sh 2>/dev/null || true
                 fi
