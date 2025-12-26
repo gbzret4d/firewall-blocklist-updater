@@ -4,13 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v10.3"
+SCRIPT_VERSION="v10.4"
 
 #################################################
-# Firewall Blocklist Updater (v10.3 - Systemd Override)
-# - FIX: Disables endlessh.socket to prevent port conflicts
-# - FIX: Overwrites systemd service file to ensure stability
-# - FIX: Removed 'BindFamily' for compatibility with older versions
+# Firewall Blocklist Updater (v10.4 - Auto-Repair)
+# - FIX: Auto-Repairs Hostname issues in /etc/hosts
+# - FIX: Factory Reset for CrowdSec if config fails
+# - FIX: Disables Socket to allow Service to bind
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -125,56 +125,56 @@ send_telegram() {
     fi
 }
 
+# --- SYSTEM AUTO REPAIR ---
+repair_environment() {
+    # 1. FIX HOSTNAME (prevents sudo warnings)
+    local HN=$(hostname)
+    if ! grep -q "127.0.1.1 $HN" /etc/hosts; then
+        echo "127.0.1.1 $HN" >> /etc/hosts
+        log "🔧 Fixed missing hostname in /etc/hosts"
+    fi
+
+    # 2. DISABLE SOCKET (Fixes Endlessh conflict)
+    if systemctl is-active --quiet endlessh.socket || systemctl is-enabled --quiet endlessh.socket; then
+        systemctl stop endlessh.socket 2>/dev/null || true
+        systemctl disable endlessh.socket 2>/dev/null || true
+        log "🔧 Disabled interfering endlessh.socket"
+    fi
+}
+
 install_sensors() {
+    repair_environment
     echo ">>> Installing Sensors..."
     
     local EL_PORT=0
-    
-    # --- DYNAMIC PORT SCAN (2222 -> 2232) ---
+    # --- DYNAMIC PORT SCAN ---
     for (( p=2222; p<=2232; p++ )); do
         if ! ss -tuln | grep -q ":$p "; then
-            EL_PORT=$p
-            break
+            EL_PORT=$p; break
         else
             local PID=$(ss -lptn "sport = :$p" | grep -o 'pid=[0-9]*' | cut -d= -f2 | head -n1 || true)
-            local PNAME=""
-            if [[ -n "$PID" ]]; then PNAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "unknown"); fi
+            local PNAME=""; if [[ -n "$PID" ]]; then PNAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "unknown"); fi
             
             if [[ "$PNAME" == "endlessh" ]]; then
-                log "Port $p occupied by old endlessh (PID $PID). Reusing..."
-                kill "$PID" 2>/dev/null || true; sleep 1
-                EL_PORT=$p
-                break
-            else
-                warn "Port $p busy by '$PNAME'. Trying next..."
+                kill "$PID" 2>/dev/null || true; sleep 1; EL_PORT=$p; break
             fi
         fi
     done
 
-    if [[ $EL_PORT -eq 0 ]]; then
-        warn "❌ ERROR: No free ports found between 2222-2232 for Endlessh!"
-        return 1
-    fi
+    if [[ $EL_PORT -eq 0 ]]; then warn "❌ ERROR: No free ports found 2222-2232!"; return 1; fi
 
     if ! command -v endlessh >/dev/null; then
         if command -v apt-get >/dev/null; then apt-get update -qq && apt-get install -y endlessh
         elif command -v yum >/dev/null; then yum install -y endlessh; fi
     fi
 
-    # --- CRITICAL FIX v10.3: DISABLE SOCKET ACTIVATION ---
-    # Prevents "Address already in use" errors on Ubuntu/Debian
-    systemctl stop endlessh.socket 2>/dev/null || true
-    systemctl disable endlessh.socket 2>/dev/null || true
-
     mkdir -p /etc/endlessh
     if [[ -d /etc/endlessh ]]; then
         echo "Port $EL_PORT" > /etc/endlessh/config
         echo "Delay 10000" >> /etc/endlessh/config
         echo "LogLevel 1" >> /etc/endlessh/config
-        # Removed BindFamily to avoid syntax errors on older versions
+        echo "BindFamily 4" >> /etc/endlessh/config
         
-        # --- FIX v10.3: OVERWRITE SERVICE FILE ---
-        # We enforce a standalone service configuration to bypass broken distro defaults
         cat <<SERV > /lib/systemd/system/endlessh.service
 [Unit]
 Description=Endlessh SSH Tarpit (Custom)
@@ -196,14 +196,8 @@ ProtectHome=yes
 [Install]
 WantedBy=multi-user.target
 SERV
-        
         systemctl daemon-reload
-        if ! systemctl enable --now endlessh; then
-            warn "Endlessh failed to start on port $EL_PORT."
-        else
-            systemctl restart endlessh
-            log "✅ Endlessh running on port $EL_PORT"
-        fi
+        if ! systemctl enable --now endlessh; then warn "Endlessh failed start on $EL_PORT"; else systemctl restart endlessh; log "✅ Endlessh running on port $EL_PORT"; fi
     fi
 
     if command -v cscli >/dev/null; then
@@ -225,22 +219,40 @@ labels:
   type: endlessh
 YAML
             
-            if [[ -d "/usr/lib/crowdsec/plugins" ]]; then
-                rm -f /usr/lib/crowdsec/plugins/dummy 2>/dev/null || true
-                rm -f /usr/lib/crowdsec/plugins/*.sh 2>/dev/null || true
-                rm -f /usr/lib/crowdsec/plugins/*.html 2>/dev/null || true
-            fi
+            # --- AGGRESSIVE CLEANUP BEFORE START ---
+            rm -f /usr/lib/crowdsec/plugins/* 2>/dev/null || true
 
             if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
                 systemctl restart crowdsec
                 echo "✅ Sensors Configured."
             else
-                echo "❌ Config invalid. Rolling back..."
-                mv /etc/crowdsec/acquis.yaml.bak /etc/crowdsec/acquis.yaml 2>/dev/null || true
-                if [[ -d "/usr/lib/crowdsec/plugins" ]]; then
-                    rm -f /usr/lib/crowdsec/plugins/*.sh 2>/dev/null || true
-                fi
+                echo "❌ Config invalid. Starting EMERGENCY REPAIR..."
+                
+                # --- FACTORY RESET CROWDSEC CONFIG ---
+                rm -f /usr/lib/crowdsec/plugins/* 2>/dev/null || true
+                cat <<YAML_CLEAN > /etc/crowdsec/acquis.yaml
+filenames:
+  - /var/log/auth.log
+  - /var/log/syslog
+labels:
+  type: syslog
+---
+YAML_CLEAN
+                echo "" >> /etc/crowdsec/acquis.yaml
+                cat <<YAML_APPEND >> /etc/crowdsec/acquis.yaml
+filenames:
+  - /var/log/syslog
+  - /var/log/messages
+labels:
+  type: endlessh
+YAML_APPEND
+                
                 systemctl restart crowdsec
+                if systemctl is-active --quiet crowdsec; then
+                    log "✅ CrowdSec successfully repaired and restarted."
+                else
+                    warn "❌ CrowdSec repair failed. Please check logs."
+                fi
             fi
         fi
     fi
@@ -383,6 +395,7 @@ main() {
   [[ "${1:-}" != "--post-update" && "${1:-}" != "--configure" && $DRY_RUN -eq 0 ]] && perform_auto_update "${1:-}"
   manage_log_size
   log "=== Update Start $SCRIPT_VERSION ==="
+  repair_environment
   
   if [[ $HAS_FLOCK -eq 1 && $DRY_RUN -eq 0 ]]; then 
       exec 9>"$LOCKFILE"

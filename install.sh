@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# --- Firewall & Sensor Installer (v10.0) ---
+# --- Firewall & Sensor Installer (v10.1) ---
 # - FIX: Deep Clean of Plugin Directory before start
 # - FIX: Validates CrowdSec Config before restart
 # - LISTS: Full 32 User Sources
@@ -16,7 +16,7 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v10.0)     "
+echo "   FIREWALL & CROWDSEC INSTALLER (v10.1)     "
 echo "============================================="
 
 # --- 1. USER LIST SET ---
