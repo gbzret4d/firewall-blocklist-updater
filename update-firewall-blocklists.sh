@@ -4,13 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v10.2"
+SCRIPT_VERSION="v10.3"
 
 #################################################
-# Firewall Blocklist Updater (v10.2 - Final Polish)
-# - FIX: Forces Endlessh to bind 0.0.0.0 (Fixes "unable to resolve host" crash)
-# - FIX: Self-Healing Plugin Cleanup
-# - FEAT: Dynamic Port Scanner
+# Firewall Blocklist Updater (v10.3 - Systemd Override)
+# - FIX: Disables endlessh.socket to prevent port conflicts
+# - FIX: Overwrites systemd service file to ensure stability
+# - FIX: Removed 'BindFamily' for compatibility with older versions
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -161,23 +161,43 @@ install_sensors() {
         elif command -v yum >/dev/null; then yum install -y endlessh; fi
     fi
 
+    # --- CRITICAL FIX v10.3: DISABLE SOCKET ACTIVATION ---
+    # Prevents "Address already in use" errors on Ubuntu/Debian
+    systemctl stop endlessh.socket 2>/dev/null || true
+    systemctl disable endlessh.socket 2>/dev/null || true
+
     mkdir -p /etc/endlessh
     if [[ -d /etc/endlessh ]]; then
         echo "Port $EL_PORT" > /etc/endlessh/config
         echo "Delay 10000" >> /etc/endlessh/config
         echo "LogLevel 1" >> /etc/endlessh/config
+        # Removed BindFamily to avoid syntax errors on older versions
         
-        # FIX v10.2: Explicitly bind to 0.0.0.0 to ignore broken hostnames
-        echo "BindFamily 4" >> /etc/endlessh/config
+        # --- FIX v10.3: OVERWRITE SERVICE FILE ---
+        # We enforce a standalone service configuration to bypass broken distro defaults
+        cat <<SERV > /lib/systemd/system/endlessh.service
+[Unit]
+Description=Endlessh SSH Tarpit (Custom)
+Documentation=man:endlessh(1)
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=30s
+ExecStart=/usr/bin/endlessh -v -f /etc/endlessh/config
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
+SERV
         
-        local SVC="/lib/systemd/system/endlessh.service"
-        if [[ -f "$SVC" ]]; then
-            if ! grep -q "AmbientCapabilities" "$SVC"; then
-                sed -i '/\[Service\]/a AmbientCapabilities=CAP_NET_BIND_SERVICE' "$SVC"
-                systemctl daemon-reload
-            fi
-        fi
-        
+        systemctl daemon-reload
         if ! systemctl enable --now endlessh; then
             warn "Endlessh failed to start on port $EL_PORT."
         else
@@ -205,7 +225,6 @@ labels:
   type: endlessh
 YAML
             
-            # --- SELF-HEALING PLUGIN CLEANUP ---
             if [[ -d "/usr/lib/crowdsec/plugins" ]]; then
                 rm -f /usr/lib/crowdsec/plugins/dummy 2>/dev/null || true
                 rm -f /usr/lib/crowdsec/plugins/*.sh 2>/dev/null || true
