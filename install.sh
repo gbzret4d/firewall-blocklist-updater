@@ -1,12 +1,10 @@
 #!/bin/bash
 set -e
 
-# --- Firewall & Sensor Installer (v9.2) ---
-# - FIX: Ensures consistent CrowdSec Config
-# - FIX: Plugin Auto-Cleanup (Fixes "invalid plugin" crash)
+# --- Firewall & Sensor Installer (v9.3) ---
+# - FIX: Deep Clean of Plugin Directory before start
 # - LISTS: Full 32 User Sources
 
-# --- CONFIGURATION MAPPING ---
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-}"
 CS_ENROLL="${CROWDSEC_ENROLL_KEY:-}"
 DYNDNS="${DYNDNS_HOST:-}"
@@ -16,10 +14,9 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v9.2)      "
+echo "   FIREWALL & CROWDSEC INSTALLER (v9.3)      "
 echo "============================================="
 
-# --- 1. USER LIST SET ---
 DEFAULT_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
@@ -55,10 +52,8 @@ DEFAULT_LISTS=(
     "MyIP (FireHOL)|https://iplists.firehol.org/files/myip.ipset"
 )
 
-# --- 2. SYSTEM CHECK ---
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
 
-# --- 3. PREPARING ENVIRONMENT ---
 echo ">>> 1. INSTALLING DEPENDENCIES..."
 if command -v apt-get >/dev/null; then
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
@@ -68,11 +63,8 @@ elif command -v dnf >/dev/null; then
     dnf install -y curl ipset iptables bind-utils unzip file iproute
 elif command -v yum >/dev/null; then
     yum install -y curl ipset iptables bind-utils unzip file iproute
-elif command -v zypper >/dev/null; then
-    zypper install -y curl ipset iptables bind-utils unzip file iproute2
 fi
 
-# --- 4. CROWDSEC INSTALLATION ---
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
@@ -89,7 +81,7 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         fi
     fi
 
-    # CLEANUP PLUGINS (Self-Correction)
+    # CLEANUP PLUGINS
     if [[ -d "/usr/lib/crowdsec/plugins" ]]; then
         rm -f /usr/lib/crowdsec/plugins/dummy
         rm -f /usr/lib/crowdsec/plugins/install.sh
@@ -101,13 +93,11 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         cscli notifications update >/dev/null 2>&1 || true
     fi
 
-    # Enroll
     if [[ -n "$CS_ENROLL" ]]; then
         echo " -> Enrolling..."
         cscli console enroll "$CS_ENROLL" --overwrite || true
     fi
 
-    # AbuseIPDB Config
     if [[ -n "$ABUSE_KEY" ]]; then
         mkdir -p /etc/crowdsec/notifications
         cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
@@ -127,8 +117,6 @@ headers:
   Content-Type: application/json
   Accept: application/json
 YAML
-
-        # Add to profile
         if ! grep -q "abuseipdb" /etc/crowdsec/profiles.yaml 2>/dev/null; then
             cat <<YAML > /etc/crowdsec/profiles.yaml
 name: default_ip_remediation
@@ -145,7 +133,6 @@ YAML
         fi
     fi
 
-    # Check & Restart
     if command -v crowdsec >/dev/null; then
         if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
             systemctl restart crowdsec
@@ -156,7 +143,6 @@ YAML
     fi
 fi
 
-# --- 5. INSTALL UPDATER SCRIPT ---
 echo ">>> 3. INSTALLING UPDATER..."
 INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -182,7 +168,6 @@ TELEGRAM_CHAT_ID="$TG_CHAT"
 ENV
 chmod 600 "$CONF_DIR/firewall-blocklist-keys.env"
 
-# --- 6. SYSTEMD SETUP ---
 cat <<SERV > /etc/systemd/system/firewall-blocklist-updater.service
 [Unit]
 Description=Firewall Blocklist Updater
@@ -210,7 +195,6 @@ TIME
 systemctl daemon-reload
 systemctl enable --now firewall-blocklist-updater.timer
 
-# --- 7. INITIAL RUN ---
 echo ">>> 4. RUNNING INITIAL UPDATE..."
 $INSTALL_DIR/update-firewall-blocklists.sh
 
