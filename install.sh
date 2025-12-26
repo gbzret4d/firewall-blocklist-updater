@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
 
-# --- Firewall & Sensor Installer (v10.5) ---
-# - FIX: Boot Persistence (Firewall loads immediately on reboot)
-# - FIX: APT Lock Wait (Prevents crash if auto-updates are running)
-# - FIX: Deep Clean & Config Validation
+# --- Firewall & Sensor Installer (v10.7) ---
+# - FIX: Boot Persistence
+# - FIX: APT Lock Wait
+# - FIX: Deep Clean
 
 # --- CONFIGURATION MAPPING ---
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-}"
@@ -16,7 +16,7 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v10.5)     "
+echo "   FIREWALL & CROWDSEC INSTALLER (v10.7)     "
 echo "============================================="
 
 # --- 1. USER LIST SET ---
@@ -55,16 +55,13 @@ DEFAULT_LISTS=(
     "MyIP (FireHOL)|https://iplists.firehol.org/files/myip.ipset"
 )
 
-# --- 2. SYSTEM CHECK ---
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
 
-# --- 3. PREPARING ENVIRONMENT ---
 echo ">>> 1. INSTALLING DEPENDENCIES..."
 
-# FIX: Robust APT Lock Wait
 wait_for_apt() {
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-        echo "⏳ Waiting for other package managers to finish..."
+        echo "⏳ Waiting for apt lock..."
         sleep 2
     done
 }
@@ -80,7 +77,6 @@ elif command -v yum >/dev/null; then
     yum install -y curl ipset iptables bind-utils unzip file iproute
 fi
 
-# --- 4. CROWDSEC INSTALLATION ---
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
@@ -98,7 +94,6 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         fi
     fi
 
-    # CLEANUP PLUGINS
     if [[ -d "/usr/lib/crowdsec/plugins" ]]; then
         rm -f /usr/lib/crowdsec/plugins/dummy
         rm -f /usr/lib/crowdsec/plugins/install.sh
@@ -110,13 +105,11 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         cscli notifications update >/dev/null 2>&1 || true
     fi
 
-    # Enroll
     if [[ -n "$CS_ENROLL" ]]; then
         echo " -> Enrolling..."
         cscli console enroll "$CS_ENROLL" --overwrite || true
     fi
 
-    # AbuseIPDB Config
     if [[ -n "$ABUSE_KEY" ]]; then
         mkdir -p /etc/crowdsec/notifications
         cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
@@ -137,7 +130,6 @@ headers:
   Accept: application/json
 YAML
 
-        # Add to profile
         if ! grep -q "abuseipdb" /etc/crowdsec/profiles.yaml 2>/dev/null; then
             cat <<YAML > /etc/crowdsec/profiles.yaml
 name: default_ip_remediation
@@ -154,7 +146,6 @@ YAML
         fi
     fi
 
-    # Install Bouncer
     if ! command -v crowdsec-firewall-bouncer >/dev/null; then
         if command -v apt-get >/dev/null; then 
             wait_for_apt
@@ -162,18 +153,12 @@ YAML
         else yum install -y crowdsec-firewall-bouncer-iptables; fi
     fi
     
-    # Check Config & Restart
     if command -v crowdsec >/dev/null; then
-        if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
-            systemctl restart crowdsec
-            systemctl enable --now crowdsec-firewall-bouncer || true
-        else
-            echo "⚠️ CrowdSec config invalid. Skipping restart."
-        fi
+        # Don't restart yet, wait for updater to fix ports
+        echo "ℹ️ CrowdSec installed. Configuration continues in Updater."
     fi
 fi
 
-# --- 5. INSTALL UPDATER SCRIPT ---
 echo ">>> 3. INSTALLING UPDATER..."
 INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -184,13 +169,11 @@ mkdir -p "$CONF_DIR/backups"
 curl -sfL "https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/update-firewall-blocklists.sh" -o "$INSTALL_DIR/update-firewall-blocklists.sh"
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
 
-# Create Source List
 : > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 for entry in "${DEFAULT_LISTS[@]}"; do
     echo "${entry#*|}" >> "$CONF_DIR/firewall-blocklists/blocklist.sources"
 done
 
-# Create Config File
 cat <<ENV > "$CONF_DIR/firewall-blocklist-keys.env"
 ABUSEIPDB_API_KEY="$ABUSE_KEY"
 DYNDNS_HOST="$DYNDNS"
@@ -201,7 +184,6 @@ TELEGRAM_CHAT_ID="$TG_CHAT"
 ENV
 chmod 600 "$CONF_DIR/firewall-blocklist-keys.env"
 
-# --- 6. SYSTEMD SETUP (BOOT PERSISTENCE) ---
 cat <<SERV > /etc/systemd/system/firewall-blocklist-updater.service
 [Unit]
 Description=Firewall Blocklist Updater
@@ -230,11 +212,9 @@ WantedBy=timers.target
 TIME
 
 systemctl daemon-reload
-# Enable Service (runs on boot) AND Timer (runs hourly)
 systemctl enable --now firewall-blocklist-updater.service
 systemctl enable --now firewall-blocklist-updater.timer
 
-# --- 7. INITIAL RUN ---
 echo ">>> 4. RUNNING INITIAL UPDATE..."
 $INSTALL_DIR/update-firewall-blocklists.sh
 

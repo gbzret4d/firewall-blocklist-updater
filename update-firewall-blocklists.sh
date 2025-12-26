@@ -4,13 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v10.5"
+SCRIPT_VERSION="v10.8"
 
 #################################################
-# Firewall Blocklist Updater (v10.5 - Safety Net)
-# - FEAT: Safety Check: Aborts if < 10,000 IPs found (prevents fail-open)
+# Firewall Blocklist Updater (v10.8 - High Port Rescue)
+# - FIX: API Rescue uses Ports 42000-42010 (Avoids 8080/8081 conflicts)
+# - FIX: Robust Regex for Config patching
 # - FIX: Auto-Repairs Hostname & Socket Conflicts
-# - FIX: Dynamic Port Scan
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -125,20 +125,46 @@ send_telegram() {
     fi
 }
 
-# --- SYSTEM AUTO REPAIR ---
 repair_environment() {
-    # 1. FIX HOSTNAME
     local HN=$(hostname)
     if ! grep -q "127.0.1.1 $HN" /etc/hosts; then
         echo "127.0.1.1 $HN" >> /etc/hosts
         log "🔧 Fixed missing hostname in /etc/hosts"
     fi
-
-    # 2. DISABLE SOCKET
     if systemctl is-active --quiet endlessh.socket || systemctl is-enabled --quiet endlessh.socket; then
         systemctl stop endlessh.socket 2>/dev/null || true
         systemctl disable endlessh.socket 2>/dev/null || true
-        log "🔧 Disabled interfering endlessh.socket"
+    fi
+}
+
+# --- FIX 10.8: HIGH PORT API RESCUE ---
+fix_crowdsec_api() {
+    log "🚑 CrowdSec API Rescue Mode..."
+    
+    local API_PORT=0
+    # Scan for free port 42000 -> 42010 (Safe High Range)
+    for (( p=42000; p<=42010; p++ )); do
+        if ! ss -tuln | grep -q ":$p "; then
+            API_PORT=$p
+            break
+        fi
+    done
+    
+    if [[ $API_PORT -eq 0 ]]; then 
+        warn "❌ Fatal: Could not find free port in 42000-42010 range."
+        return 1
+    fi
+    
+    log "🔍 Selected CrowdSec API Port: $API_PORT (Localhost Only)"
+    
+    # Update Configs with new port using flexible regex
+    sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml
+    sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/local_api_credentials.yaml
+    
+    # Reset Credentials if needed
+    if ! cscli machines list -o json 2>/dev/null | grep -q "login"; then
+        log "Regenerating machine credentials..."
+        cscli machines add -a -f > /etc/crowdsec/local_api_credentials.yaml || true
     fi
 }
 
@@ -147,17 +173,12 @@ install_sensors() {
     echo ">>> Installing Sensors..."
     
     local EL_PORT=0
-    # --- DYNAMIC PORT SCAN ---
     for (( p=2222; p<=2232; p++ )); do
-        if ! ss -tuln | grep -q ":$p "; then
-            EL_PORT=$p; break
+        if ! ss -tuln | grep -q ":$p "; then EL_PORT=$p; break
         else
             local PID=$(ss -lptn "sport = :$p" | grep -o 'pid=[0-9]*' | cut -d= -f2 | head -n1 || true)
             local PNAME=""; if [[ -n "$PID" ]]; then PNAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "unknown"); fi
-            
-            if [[ "$PNAME" == "endlessh" ]]; then
-                kill "$PID" 2>/dev/null || true; sleep 1; EL_PORT=$p; break
-            fi
+            if [[ "$PNAME" == "endlessh" ]]; then kill "$PID" 2>/dev/null || true; sleep 1; EL_PORT=$p; break; fi
         fi
     done
 
@@ -210,7 +231,6 @@ SERV
             
             echo "" >> /etc/crowdsec/acquis.yaml
             if [[ -s /etc/crowdsec/acquis.yaml ]]; then echo "---" >> /etc/crowdsec/acquis.yaml; fi
-            
             cat <<YAML >> /etc/crowdsec/acquis.yaml
 filenames:
   - /var/log/syslog
@@ -225,7 +245,10 @@ YAML
                 systemctl restart crowdsec
                 echo "✅ Sensors Configured."
             else
-                echo "❌ Config invalid. Starting EMERGENCY REPAIR..."
+                echo "❌ Config invalid. Starting EMERGENCY REPAIR (API Rescue)..."
+                
+                # --- RUN API FIXER ---
+                fix_crowdsec_api
                 
                 rm -f /usr/lib/crowdsec/plugins/* 2>/dev/null || true
                 cat <<YAML_CLEAN > /etc/crowdsec/acquis.yaml
@@ -249,7 +272,7 @@ YAML_APPEND
                 if systemctl is-active --quiet crowdsec; then
                     log "✅ CrowdSec successfully repaired and restarted."
                 else
-                    warn "❌ CrowdSec repair failed. Please check logs."
+                    warn "❌ CrowdSec repair failed. Please check logs manually."
                 fi
             fi
         fi
@@ -311,6 +334,7 @@ IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
 
 get_set_count() { ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
 
+# --- ROBUST EXTRACTION ---
 smart_extract() {
     local f="$1"
     if gzip -t "$f" 2>/dev/null; then zcat "$f"; elif unzip -t "$f" 2>/dev/null; then unzip -p "$f"; else cat "$f"; fi
@@ -419,10 +443,9 @@ main() {
   
   download_lists "$TMPDIR/bl_raw.lst" "${bl[@]}"
   
-  # --- SAFETY CHECK: LIST SIZE ---
   local line_count=$(wc -l < "$TMPDIR/bl_raw.lst" || echo 0)
   if [[ $line_count -lt 10000 ]]; then
-      warn "⚠️ SAFETY STOP: Only $line_count IPs found in lists. Keeping old rules to prevent fail-open."
+      warn "⚠️ SAFETY STOP: Only $line_count IPs found. Keeping old rules."
       if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then send_telegram "⚠️ Update Skipped: Too few IPs ($line_count)"; fi
       exit 0
   fi
