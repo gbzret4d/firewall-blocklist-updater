@@ -4,13 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v10.8"
+SCRIPT_VERSION="v10.9"
 
 #################################################
-# Firewall Blocklist Updater (v10.8 - High Port Rescue)
-# - FIX: API Rescue uses Ports 42000-42010 (Avoids 8080/8081 conflicts)
-# - FIX: Robust Regex for Config patching
-# - FIX: Auto-Repairs Hostname & Socket Conflicts
+# Firewall Blocklist Updater (v10.9 - Silent Polish)
+# - FIX: Silenced systemctl warnings for non-existent sockets
+# - FIX: High Port Rescue for API
+# - FEAT: Safety Check & Auto-Repair
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -131,10 +131,9 @@ repair_environment() {
         echo "127.0.1.1 $HN" >> /etc/hosts
         log "🔧 Fixed missing hostname in /etc/hosts"
     fi
-    if systemctl is-active --quiet endlessh.socket || systemctl is-enabled --quiet endlessh.socket; then
-        systemctl stop endlessh.socket 2>/dev/null || true
-        systemctl disable endlessh.socket 2>/dev/null || true
-    fi
+    # FIX v10.9: Silenced warning if socket does not exist
+    systemctl stop endlessh.socket >/dev/null 2>&1 || true
+    systemctl disable endlessh.socket >/dev/null 2>&1 || true
 }
 
 # --- FIX 10.8: HIGH PORT API RESCUE ---
