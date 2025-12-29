@@ -4,11 +4,11 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v10.9"
+SCRIPT_VERSION="v10.10"
 
 #################################################
-# Firewall Blocklist Updater (v10.9 - Silent Polish)
-# - FIX: Silenced systemctl warnings for non-existent sockets
+# Firewall Blocklist Updater (v10.10 - Rescue Fix)
+# - FIX: Corrected cscli syntax error in API Rescue mode (removed dangling -f)
 # - FIX: High Port Rescue for API
 # - FEAT: Safety Check & Auto-Repair
 # - LISTS: Full 32 Sources
@@ -131,12 +131,11 @@ repair_environment() {
         echo "127.0.1.1 $HN" >> /etc/hosts
         log "🔧 Fixed missing hostname in /etc/hosts"
     fi
-    # FIX v10.9: Silenced warning if socket does not exist
     systemctl stop endlessh.socket >/dev/null 2>&1 || true
     systemctl disable endlessh.socket >/dev/null 2>&1 || true
 }
 
-# --- FIX 10.8: HIGH PORT API RESCUE ---
+# --- FIX 10.10: CORRECT CSCLI SYNTAX IN RESCUE ---
 fix_crowdsec_api() {
     log "🚑 CrowdSec API Rescue Mode..."
     
@@ -156,14 +155,13 @@ fix_crowdsec_api() {
     
     log "🔍 Selected CrowdSec API Port: $API_PORT (Localhost Only)"
     
-    # Update Configs with new port using flexible regex
     sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml
     sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/local_api_credentials.yaml
     
-    # Reset Credentials if needed
     if ! cscli machines list -o json 2>/dev/null | grep -q "login"; then
         log "Regenerating machine credentials..."
-        cscli machines add -a -f > /etc/crowdsec/local_api_credentials.yaml || true
+        # FIX: Removed the '-f' flag before the redirect
+        cscli machines add -a > /etc/crowdsec/local_api_credentials.yaml || true
     fi
 }
 
