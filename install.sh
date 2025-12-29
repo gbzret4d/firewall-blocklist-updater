@@ -1,10 +1,12 @@
 #!/bin/bash
 set -e
 
-# --- Firewall & Sensor Installer (v10.7) ---
-# - FIX: Boot Persistence
-# - FIX: APT Lock Wait
-# - FIX: Deep Clean
+# --- Firewall & Sensor Installer (v10.6) ---
+# - FIX: Sets DEBIAN_FRONTEND=noninteractive to prevent apt hangs
+# - FIX: Pre-installs apt-transport-https to avoid CrowdSec script freeze
+# - FIX: Boot Persistence & APT Lock Wait
+
+export DEBIAN_FRONTEND=noninteractive
 
 # --- CONFIGURATION MAPPING ---
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-}"
@@ -16,7 +18,7 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v10.7)     "
+echo "   FIREWALL & CROWDSEC INSTALLER (v10.6)     "
 echo "============================================="
 
 # --- 1. USER LIST SET ---
@@ -66,11 +68,12 @@ wait_for_apt() {
     done
 }
 
+# Pre-install apt-transport-https to avoid hang in external script
 if command -v apt-get >/dev/null; then
     wait_for_apt
     apt-get update -qq
     wait_for_apt
-    apt-get install -y curl ipset iptables dnsutils unzip file gnupg iproute2
+    apt-get install -y curl ipset iptables dnsutils unzip file gnupg iproute2 apt-transport-https
 elif command -v dnf >/dev/null; then
     dnf install -y curl ipset iptables bind-utils unzip file iproute
 elif command -v yum >/dev/null; then
@@ -85,7 +88,8 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
     
     if [[ "$CS_INSTALLED" == "false" ]]; then
         if [ -f /etc/debian_version ]; then
-            curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash 2>/dev/null
+            # Fix: Run external script with noninteractive flag explicitly
+            curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | DEBIAN_FRONTEND=noninteractive bash 2>/dev/null
             wait_for_apt
             apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables
         elif [ -f /etc/redhat-release ]; then
@@ -154,7 +158,6 @@ YAML
     fi
     
     if command -v crowdsec >/dev/null; then
-        # Don't restart yet, wait for updater to fix ports
         echo "ℹ️ CrowdSec installed. Configuration continues in Updater."
     fi
 fi
