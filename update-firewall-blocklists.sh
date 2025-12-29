@@ -4,17 +4,16 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v10.10"
+SCRIPT_VERSION="v10.11"
 
 #################################################
-# Firewall Blocklist Updater (v10.10 - Rescue Fix)
-# - FIX: Corrected cscli syntax error in API Rescue mode (removed dangling -f)
-# - FIX: High Port Rescue for API
-# - FEAT: Safety Check & Auto-Repair
+# Firewall Blocklist Updater (v10.11 - Stability Polish)
+# - FIX: Uses 'cscli --file' to prevent log pollution in credentials.yaml
+# - FIX: Updates Bouncer config when API port changes (Crucial!)
+# - FIX: Silenced systemctl warnings
 # - LISTS: Full 32 Sources
 #################################################
 
-# --- Constants ---
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="$BASE_DIR/firewall-blocklists"
 KEYFILE="${KEYFILE:-$BASE_DIR/firewall-blocklist-keys.env}"
@@ -26,12 +25,10 @@ LOCKFILE="/var/run/firewall-updater.lock"
 LOGFILE="/var/log/firewall-blocklist-updater.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 
-# --- Globals ---
 DRY_RUN=0
 IPV6_ENABLED=1
 USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-# --- Lists (Full Sync) ---
 RECOMMENDED_LISTS=(
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
@@ -135,12 +132,12 @@ repair_environment() {
     systemctl disable endlessh.socket >/dev/null 2>&1 || true
 }
 
-# --- FIX 10.10: CORRECT CSCLI SYNTAX IN RESCUE ---
+# --- FIX 10.11: CLEAN API RESCUE ---
 fix_crowdsec_api() {
     log "🚑 CrowdSec API Rescue Mode..."
     
     local API_PORT=0
-    # Scan for free port 42000 -> 42010 (Safe High Range)
+    # Scan for free port 42000 -> 42010
     for (( p=42000; p<=42010; p++ )); do
         if ! ss -tuln | grep -q ":$p "; then
             API_PORT=$p
@@ -155,13 +152,21 @@ fix_crowdsec_api() {
     
     log "🔍 Selected CrowdSec API Port: $API_PORT (Localhost Only)"
     
+    # 1. Update Agent Config
     sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml
     sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/local_api_credentials.yaml
     
+    # 2. Update Firewall Bouncer Config (Crucial!)
+    if [[ -f "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml" ]]; then
+        sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+        log "🔧 Updated Bouncer config to Port $API_PORT"
+    fi
+    
+    # 3. Clean Credential Regeneration
+    # Use --file to ensure clean YAML writing without stdout pollution
     if ! cscli machines list -o json 2>/dev/null | grep -q "login"; then
         log "Regenerating machine credentials..."
-        # FIX: Removed the '-f' flag before the redirect
-        cscli machines add -a > /etc/crowdsec/local_api_credentials.yaml || true
+        cscli machines add --auto --force --file /etc/crowdsec/local_api_credentials.yaml || true
     fi
 }
 
@@ -266,6 +271,9 @@ labels:
 YAML_APPEND
                 
                 systemctl restart crowdsec
+                # Restart Bouncer too since we might have changed port
+                systemctl restart crowdsec-firewall-bouncer || true
+                
                 if systemctl is-active --quiet crowdsec; then
                     log "✅ CrowdSec successfully repaired and restarted."
                 else
@@ -331,7 +339,6 @@ IPSET_HASH_SIZE=4096; IPSET_MAX_ELEM=2000000
 
 get_set_count() { ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
 
-# --- ROBUST EXTRACTION ---
 smart_extract() {
     local f="$1"
     if gzip -t "$f" 2>/dev/null; then zcat "$f"; elif unzip -t "$f" 2>/dev/null; then unzip -p "$f"; else cat "$f"; fi
