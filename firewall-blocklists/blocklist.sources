@@ -41,3 +41,8 @@ https://cinsscore.com/list/ci-badguys.txt
 http://www.botvrij.eu/data/ioclist.ip-dst.raw
 https://iplists.firehol.org/files/cybercrime.ipset
 https://iplists.firehol.org/files/myip.ipset
+https://iplists.firehol.org/files/firehol_level1.netset
+https://iplists.firehol.org/files/sblam.ipset
+https://iplists.firehol.org/files/firehol_webclient.netset
+https://iplists.firehol.org/files/firehol_level2.netset
+https://iplists.firehol.org/files/botscout_7d.ipset
