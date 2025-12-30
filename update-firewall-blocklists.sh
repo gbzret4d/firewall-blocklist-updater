@@ -4,13 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v10.11"
+SCRIPT_VERSION="v11.1"
 
 #################################################
-# Firewall Blocklist Updater (v10.11 - Stability Polish)
-# - FIX: Uses 'cscli --file' to prevent log pollution in credentials.yaml
-# - FIX: Updates Bouncer config when API port changes (Crucial!)
-# - FIX: Silenced systemctl warnings
+# Firewall Blocklist Updater (v11.1 - Smart IPv6)
+# - FEAT: Smart IPv6 Check (Enables only if PUBLIC IPv6 exists)
+# - FEAT: Docker Container Protection (DOCKER-USER Chain)
+# - FIX: High Port API Rescue & Auto-Repair
 # - LISTS: Full 32 Sources
 #################################################
 
@@ -26,7 +26,7 @@ LOGFILE="/var/log/firewall-blocklist-updater.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 
 DRY_RUN=0
-IPV6_ENABLED=1
+IPV6_ENABLED=0 # Default off, enabled by smart check
 USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 RECOMMENDED_LISTS=(
@@ -80,10 +80,17 @@ trap cleanup EXIT INT TERM
 HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
 mkdir -p "$BASE_DIR" "$CONFIG_DIR" "$BACKUP_DIR" /tmp/firewall-blocklists
 
-check_ipv6_stack() {
+# --- SMART IPv6 CHECK ---
+check_ipv6_connectivity() {
+    # 1. Check if Kernel supports IPv6
     if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi
-    if ! ip -6 addr show scope global | grep -q "inet6"; then return 1; fi
-    return 0
+    
+    # 2. Check if we have a PUBLIC (Global Scope) IPv6 address
+    # We ignore "link" scope (fe80::) and "host" scope (::1)
+    if ip -6 addr show scope global | grep -q "inet6"; then
+        return 0
+    fi
+    return 1
 }
 
 load_env_vars() {
@@ -132,17 +139,13 @@ repair_environment() {
     systemctl disable endlessh.socket >/dev/null 2>&1 || true
 }
 
-# --- FIX 10.11: CLEAN API RESCUE ---
+# --- CROWDSEC API RESCUE ---
 fix_crowdsec_api() {
     log "🚑 CrowdSec API Rescue Mode..."
     
     local API_PORT=0
-    # Scan for free port 42000 -> 42010
     for (( p=42000; p<=42010; p++ )); do
-        if ! ss -tuln | grep -q ":$p "; then
-            API_PORT=$p
-            break
-        fi
+        if ! ss -tuln | grep -q ":$p "; then API_PORT=$p; break; fi
     done
     
     if [[ $API_PORT -eq 0 ]]; then 
@@ -152,18 +155,14 @@ fix_crowdsec_api() {
     
     log "🔍 Selected CrowdSec API Port: $API_PORT (Localhost Only)"
     
-    # 1. Update Agent Config
     sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml
     sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/local_api_credentials.yaml
     
-    # 2. Update Firewall Bouncer Config (Crucial!)
     if [[ -f "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml" ]]; then
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
         log "🔧 Updated Bouncer config to Port $API_PORT"
     fi
     
-    # 3. Clean Credential Regeneration
-    # Use --file to ensure clean YAML writing without stdout pollution
     if ! cscli machines list -o json 2>/dev/null | grep -q "login"; then
         log "Regenerating machine credentials..."
         cscli machines add --auto --force --file /etc/crowdsec/local_api_credentials.yaml || true
@@ -176,8 +175,7 @@ install_sensors() {
     
     local EL_PORT=0
     for (( p=2222; p<=2232; p++ )); do
-        if ! ss -tuln | grep -q ":$p "; then EL_PORT=$p; break
-        else
+        if ! ss -tuln | grep -q ":$p "; then EL_PORT=$p; break; else
             local PID=$(ss -lptn "sport = :$p" | grep -o 'pid=[0-9]*' | cut -d= -f2 | head -n1 || true)
             local PNAME=""; if [[ -n "$PID" ]]; then PNAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "unknown"); fi
             if [[ "$PNAME" == "endlessh" ]]; then kill "$PID" 2>/dev/null || true; sleep 1; EL_PORT=$p; break; fi
@@ -248,10 +246,7 @@ YAML
                 echo "✅ Sensors Configured."
             else
                 echo "❌ Config invalid. Starting EMERGENCY REPAIR (API Rescue)..."
-                
-                # --- RUN API FIXER ---
                 fix_crowdsec_api
-                
                 rm -f /usr/lib/crowdsec/plugins/* 2>/dev/null || true
                 cat <<YAML_CLEAN > /etc/crowdsec/acquis.yaml
 filenames:
@@ -269,11 +264,8 @@ filenames:
 labels:
   type: endlessh
 YAML_APPEND
-                
                 systemctl restart crowdsec
-                # Restart Bouncer too since we might have changed port
                 systemctl restart crowdsec-firewall-bouncer || true
-                
                 if systemctl is-active --quiet crowdsec; then
                     log "✅ CrowdSec successfully repaired and restarted."
                 else
@@ -428,7 +420,13 @@ main() {
   fi
   
   check_connectivity
-  if check_ipv6_stack; then IPV6_ENABLED=1; else IPV6_ENABLED=0; fi
+  if check_ipv6_connectivity; then
+      IPV6_ENABLED=1
+      log "ℹ️ Public IPv6 detected. Enabling IPv6 protection."
+  else
+      IPV6_ENABLED=0
+      log "ℹ️ No Public IPv6 detected. Disabling IPv6 to save resources."
+  fi
   
   local cnt_old_v4=$(get_set_count "$IPSET_BL")
   local cnt_old_v6=$(get_set_count "${IPSET_BL}_v6")
@@ -466,7 +464,17 @@ main() {
   load_ipset "$TMPDIR/bl_final.v6" "${IPSET_BL}_v6" "inet6"
 
   if [[ $DRY_RUN -eq 0 ]]; then
-      iptables -C INPUT -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set "$IPSET_BL" src -j DROP
+      # --- HOST PROTECTION (INPUT) ---
+      iptables -C INPUT -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || \
+      iptables -I INPUT -m set --match-set "$IPSET_BL" src -j DROP
+      
+      # --- DOCKER PROTECTION (DOCKER-USER) ---
+      # This protects mapped ports of all docker containers
+      if iptables -L DOCKER-USER >/dev/null 2>&1; then
+          iptables -C DOCKER-USER -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || \
+          iptables -I DOCKER-USER -m set --match-set "$IPSET_BL" src -j DROP
+      fi
+
       if [[ $IPV6_ENABLED -eq 1 ]]; then
           command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP; }
       fi
