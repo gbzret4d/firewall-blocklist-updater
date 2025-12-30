@@ -4,11 +4,11 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v11.1"
+SCRIPT_VERSION="v11.2"
 
 #################################################
-# Firewall Blocklist Updater (v11.1 - Smart IPv6)
-# - FEAT: Smart IPv6 Check (Enables only if PUBLIC IPv6 exists)
+# Firewall Blocklist Updater (v11.2 - IPv6 Standard)
+# - CHANGE: IPv6 enabled by default (checks Kernel support only)
 # - FEAT: Docker Container Protection (DOCKER-USER Chain)
 # - FIX: High Port API Rescue & Auto-Repair
 # - LISTS: Full 32 Sources
@@ -26,7 +26,7 @@ LOGFILE="/var/log/firewall-blocklist-updater.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 
 DRY_RUN=0
-IPV6_ENABLED=0 # Default off, enabled by smart check
+IPV6_ENABLED=1 # Default ON
 USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 RECOMMENDED_LISTS=(
@@ -80,17 +80,13 @@ trap cleanup EXIT INT TERM
 HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
 mkdir -p "$BASE_DIR" "$CONFIG_DIR" "$BACKUP_DIR" /tmp/firewall-blocklists
 
-# --- SMART IPv6 CHECK ---
-check_ipv6_connectivity() {
-    # 1. Check if Kernel supports IPv6
+# --- IPv6 KERNEL CHECK ---
+check_ipv6_stack() {
+    # Check if Kernel supports IPv6 at all
     if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi
-    
-    # 2. Check if we have a PUBLIC (Global Scope) IPv6 address
-    # We ignore "link" scope (fe80::) and "host" scope (::1)
-    if ip -6 addr show scope global | grep -q "inet6"; then
-        return 0
-    fi
-    return 1
+    # Check if tools are present
+    if ! command -v ip6tables >/dev/null; then return 1; fi
+    return 0
 }
 
 load_env_vars() {
@@ -165,6 +161,7 @@ fix_crowdsec_api() {
     
     if ! cscli machines list -o json 2>/dev/null | grep -q "login"; then
         log "Regenerating machine credentials..."
+        # FIX: Ensure clean file write
         cscli machines add --auto --force --file /etc/crowdsec/local_api_credentials.yaml || true
     fi
 }
@@ -420,12 +417,12 @@ main() {
   fi
   
   check_connectivity
-  if check_ipv6_connectivity; then
+  if check_ipv6_stack; then 
       IPV6_ENABLED=1
-      log "ℹ️ Public IPv6 detected. Enabling IPv6 protection."
-  else
+      log "ℹ️ IPv6 Support detected (Kernel)."
+  else 
       IPV6_ENABLED=0
-      log "ℹ️ No Public IPv6 detected. Disabling IPv6 to save resources."
+      log "ℹ️ No IPv6 Support detected (Kernel). Skipping IPv6."
   fi
   
   local cnt_old_v4=$(get_set_count "$IPSET_BL")
@@ -469,7 +466,6 @@ main() {
       iptables -I INPUT -m set --match-set "$IPSET_BL" src -j DROP
       
       # --- DOCKER PROTECTION (DOCKER-USER) ---
-      # This protects mapped ports of all docker containers
       if iptables -L DOCKER-USER >/dev/null 2>&1; then
           iptables -C DOCKER-USER -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || \
           iptables -I DOCKER-USER -m set --match-set "$IPSET_BL" src -j DROP
