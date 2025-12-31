@@ -2,17 +2,16 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v17.4 - IDEMPOTENT) ---
-# - LOGIC: Checks if CrowdSec is healthy BEFORE attempting install/config
-# - FIX: Prevents unneeded "Nuclear Resets" on healthy systems
-# - FIX: Silent Success on Telegram
+# --- Firewall & Sensor Installer (v17.5 - SMART ENROLLMENT) ---
+# - FIX: Prevents re-enrollment if agent is already connected to console
+# - LOGIC: Full idempotency (Skips Setup & Enrollment if healthy)
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.4"
+INSTALLER_VERSION="v17.5"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION ---
@@ -267,7 +266,15 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         if command -v docker >/dev/null; then cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true; fi
     fi
 
-    if [[ -n "$CS_ENROLL" ]]; then cscli console enroll "$CS_ENROLL" --overwrite || true; fi
+    # SMART ENROLLMENT CHECK
+    if [[ -n "$CS_ENROLL" ]]; then 
+        if cscli console status 2>/dev/null | grep -q "enrolled: true"; then
+            echo "✅ Agent is already enrolled. Skipping."
+        else
+            echo "🔑 Enrolling Agent..."
+            cscli console enroll "$CS_ENROLL" --overwrite || true
+        fi
+    fi
 
     if [[ -n "$ABUSE_KEY" ]]; then
         mkdir -p /etc/crowdsec/notifications
@@ -348,7 +355,7 @@ perform_auto_update() { return 0; }
 check_connectivity() { if ! curl -s --head --request GET https://1.1.1.1 > /dev/null; then echo "No internet."; exit 0; fi; }
 repair_environment() { local HN=$(hostname); if ! grep -q "127.0.1.1 $HN" /etc/hosts; then echo "127.0.1.1 $HN" >> /etc/hosts; fi; }
 
-# UPDATER IDENTITY
+# UPDATER IDENTITY LOGIC
 get_identity() {
     HN=$(hostname)
     IP=$(curl -s --max-time 2 http://ip-api.com/csv/?fields=query | cut -d',' -f1 || echo "Unknown-IP")
