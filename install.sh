@@ -2,16 +2,16 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v17.5 - SMART ENROLLMENT) ---
-# - FIX: Prevents re-enrollment if agent is already connected to console
-# - LOGIC: Full idempotency (Skips Setup & Enrollment if healthy)
+# --- Firewall & Sensor Installer (v17.6 - STABLE ENROLLMENT) ---
+# - FIX: Replaced fragile 'cscli status' check with robust file existence check
+# - LOGIC: Idempotent Setup + Nuclear Reset + Silent Updates
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.5"
+INSTALLER_VERSION="v17.6"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION ---
@@ -266,13 +266,15 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         if command -v docker >/dev/null; then cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true; fi
     fi
 
-    # SMART ENROLLMENT CHECK
+    # ROBUST ENROLLMENT CHECK
     if [[ -n "$CS_ENROLL" ]]; then 
-        if cscli console status 2>/dev/null | grep -q "enrolled: true"; then
-            echo "✅ Agent is already enrolled. Skipping."
+        if [[ -f "/etc/crowdsec/online_api_credentials.yaml" ]]; then
+            echo "✅ Agent is already enrolled (Credentials exist). Skipping."
         else
             echo "🔑 Enrolling Agent..."
-            cscli console enroll "$CS_ENROLL" --overwrite || true
+            if cscli console enroll "$CS_ENROLL" --overwrite; then
+                systemctl reload crowdsec || systemctl restart crowdsec
+            fi
         fi
     fi
 
