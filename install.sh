@@ -2,17 +2,17 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v16.8 - NUCLEAR OPTION) ---
-# - FEAT: Auto-Purge & Reinstall if startup loop fails completely
-# - DEBUG: Runs 'crowdsec -t' to show config errors in terminal
-# - LOGIC: Hard overrides for LAPI credentials (no more sed guessing)
+# --- Firewall & Sensor Installer (v16.9 - SYSTEMD HARDENING) ---
+# - FIX: Replaces weak CrowdSec systemd unit with a hardened version
+# - FIX: Forces 'Restart=always' and prevents start-limit failures
+# - LOGIC: Robust Port Handling
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v16.8"
+INSTALLER_VERSION="v16.9"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION ---
@@ -129,13 +129,40 @@ TIME
 systemctl daemon-reload
 systemctl enable --now daily-system-cleanup.timer
 
-# --- 4. CROWDSEC SETUP (NUCLEAR RESILIENCE) ---
+# --- 4. CROWDSEC SETUP ---
 CURRENT_TASK="CrowdSec Setup"
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
+# NEW: Harden the Systemd Service File
+harden_crowdsec_service() {
+    echo "🛡️ Hardening CrowdSec Systemd Service..."
+    cat <<SERVICE > /lib/systemd/system/crowdsec.service
+[Unit]
+Description=Crowdsec agent
+After=syslog.target network.target remote-fs.target nss-lookup.target
+
+[Service]
+Type=notify
+Environment=LC_ALL=C LANG=C
+PIDFile=/var/run/crowdsec.pid
+ExecStartPre=/usr/bin/crowdsec -c /etc/crowdsec/config.yaml -t -error
+ExecStart=/usr/bin/crowdsec -c /etc/crowdsec/config.yaml
+# HARDENING: Auto-restart on failure with delays
+Restart=always
+RestartSec=5s
+StartLimitInterval=0
+# HARDENING: Kill zombies before start
+ExecStartPre=-/usr/bin/pkill -9 -f "crowdsec -c"
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+    systemctl daemon-reload
+}
+
 purge_crowdsec() {
-    echo "☢️ PURGING CrowdSec installation (Clean Slate)..."
+    echo "☢️ PURGING CrowdSec (Clean Slate)..."
     systemctl stop crowdsec || true
     purge_pkg crowdsec crowdsec-firewall-bouncer-iptables
     rm -rf /etc/crowdsec /var/lib/crowdsec /var/log/crowdsec
@@ -143,7 +170,10 @@ purge_crowdsec() {
 }
 
 configure_and_start_crowdsec() {
-    # Brutal Cleanup
+    # 1. Harden Service First
+    harden_crowdsec_service
+    
+    # 2. Brutal Cleanup
     systemctl stop crowdsec || true
     pkill -9 crowdsec || true
     sleep 2
@@ -157,22 +187,15 @@ configure_and_start_crowdsec() {
         local TEST_PORT=$((START_PORT + ATTEMPT))
         echo "🔧 Config Attempt on Port: $TEST_PORT ($((ATTEMPT+1))/$MAX_ATTEMPTS)"
         
-        # Validate Config exists
-        if [[ ! -f "$CONFIG_FILE" ]]; then echo "❌ Config missing! Reinstalling..."; install_pkg crowdsec; fi
+        if [[ ! -f "$CONFIG_FILE" ]]; then install_pkg crowdsec; harden_crowdsec_service; fi
 
-        # Force Port Update using blanket replacement of any localhost port
+        # Force Port Update
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
         find /etc/crowdsec/bouncers/ -name "*.yaml" -exec sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" {} + 2>/dev/null || true
         
-        # TEST CONFIG BEFORE START
-        if ! crowdsec -c /etc/crowdsec/config.yaml -t 2>&1 | grep -q "Configuration is valid"; then
-            echo "⚠️ Configuration invalid. Dumping errors:"
-            crowdsec -c /etc/crowdsec/config.yaml -t || true
-        fi
-
         # Try Start
-        if systemctl start crowdsec 2>/dev/null; then
+        if systemctl start crowdsec; then
             sleep 5
             if systemctl is-active --quiet crowdsec; then
                 if cscli lapi status >/dev/null 2>&1; then
@@ -187,8 +210,7 @@ configure_and_start_crowdsec() {
         pkill -9 crowdsec || true
         ATTEMPT=$((ATTEMPT + 1))
     done
-    
-    return 1 # Failed all attempts
+    return 1
 }
 
 if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
@@ -220,7 +242,6 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
     if ! command -v crowdsec-firewall-bouncer >/dev/null; then
         CURRENT_TASK="Installing Bouncer"
         install_pkg crowdsec-firewall-bouncer-iptables
-        # Re-run loop to patch the new bouncer config
         configure_and_start_crowdsec
     fi
 
@@ -394,18 +415,6 @@ main "${1:-}"
 EOF_UPDATER
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
 
-cat <<LOG > /etc/logrotate.d/firewall-blocklist-updater
-/var/log/firewall-blocklist-updater.log {
-    daily
-    missingok
-    rotate 7
-    compress
-    delaycompress
-    notifempty
-    create 640 root root
-}
-LOG
-
 # --- POPULATE SOURCES ---
 cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 https://www.spamhaus.org/drop/drop.txt
@@ -473,6 +482,7 @@ ExecStart=$INSTALL_DIR/update-firewall-blocklists.sh
 [Install]
 WantedBy=multi-user.target
 SERV
+
 cat <<TIME > /etc/systemd/system/firewall-blocklist-updater.timer
 [Unit]
 Description=Run Firewall Blocklist Updater Hourly
@@ -483,6 +493,7 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 TIME
+
 systemctl daemon-reload
 systemctl enable --now firewall-blocklist-updater.service
 systemctl enable --now firewall-blocklist-updater.timer
