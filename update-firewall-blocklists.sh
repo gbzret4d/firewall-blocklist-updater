@@ -4,14 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v11.2"
+SCRIPT_VERSION="v11.6"
 
 #################################################
-# Firewall Blocklist Updater (v11.2 - IPv6 Standard)
-# - CHANGE: IPv6 enabled by default (checks Kernel support only)
-# - FEAT: Docker Container Protection (DOCKER-USER Chain)
-# - FIX: High Port API Rescue & Auto-Repair
-# - LISTS: Full 32 Sources
+# Firewall Blocklist Updater (v11.6 - Ultimate List)
+# - CONFIG: Massive update to 43 Sources (RPZ, CSV, TXT mixed)
+# - FEAT: Smart IPv6 & Docker Protection (DOCKER-USER)
+# - FIX: API Rescue & Auto-Repair
 #################################################
 
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -26,42 +25,64 @@ LOGFILE="/var/log/firewall-blocklist-updater.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 
 DRY_RUN=0
-IPV6_ENABLED=1 # Default ON
+IPV6_ENABLED=1
 USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
+# --- DEINE NEUE LISTE (43 Quellen) ---
 RECOMMENDED_LISTS=(
+    # --- High Confidence ---
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
     "Spamhaus EDROP|https://www.spamhaus.org/drop/edrop.txt"
     "Spamhaus IPv6|https://www.spamhaus.org/drop/dropv6.txt"
     "DShield|https://feeds.dshield.org/block.txt"
-    "Feodo Tracker|https://feodotracker.abuse.ch/downloads/ipblocklist.txt"
+    "Feodo Tracker IPs|https://feodotracker.abuse.ch/downloads/ipblocklist.txt"
     "SSLBL Abuse.ch|https://sslbl.abuse.ch/blacklist/sslipblacklist.txt"
+    "BruteForceBlocker|https://danger.rulez.sk/projects/bruteforceblocker/blist.php"
+
+    # --- Aggregators ---
     "IPSum Level 3|https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt"
     "GreenSnow|https://blocklist.greensnow.co/greensnow.txt"
     "GreenSnow (FireHOL)|https://iplists.firehol.org/files/greensnow.ipset"
     "Blocklist.de All|https://lists.blocklist.de/lists/all.txt"
     "Blocklist.de Export|https://www.blocklist.de/downloads/export-ips_all.txt"
+
+    # --- Threat Intel & Mirrors ---
     "EmergingThreats Block|https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt"
     "EmergingThreats Compromised|https://rules.emergingthreats.net/blockrules/compromised-ips.txt"
     "ET Compromised (FireHOL)|https://iplists.firehol.org/files/et_compromised.ipset"
     "BinaryDefense|https://www.binarydefense.com/banlist.txt"
     "BinaryDefense (FireHOL)|https://iplists.firehol.org/files/bds_atif.ipset"
     "BinaryDefense (CPS)|https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/binarydefense.txt"
+
+    # --- GitHub Lists ---
     "AbuseIPDB 100%|https://github.com/borestad/blocklist-abuseipdb/raw/refs/heads/main/abuseipdb-s100-7d.ipv4"
     "BruteForce High|https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/High"
     "BruteForce Extreme|https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/Extreme"
     "Malware Hackers|https://raw.githubusercontent.com/ShadowWhisperer/IPs/refs/heads/master/Malware/Hackers"
     "Malicious IP (40k)|https://github.com/romainmarcoux/malicious-ip/raw/refs/heads/main/full-40k.txt"
     "Malicious Outgoing (40k)|https://raw.githubusercontent.com/romainmarcoux/malicious-outgoing-ip/refs/heads/main/full-outgoing-ip-40k.txt"
+
+    # --- IOCs & C2 ---
     "ThreatFox IOCs|https://raw.githubusercontent.com/elliotwutingfeng/ThreatFox-IOC-IPs/refs/heads/main/ips.txt"
     "CobaltStrike IPs|https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/cobaltstrike_ips.txt"
     "AlienVault|https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/alienvault.txt"
     "CPS Compromised|https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/compromised-ips.txt"
     "Illuminate|https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/illuminate.txt"
+    "Feodo Tracker CSV|https://feodotracker.abuse.ch/downloads/ipblocklist.csv"
+    "Viriback C2 Tracker|https://tracker.viriback.com/last30.php"
+    "Feodo Recommended|https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt"
+    "SSLBL RPZ|https://sslbl.abuse.ch/blacklist/sslbl.rpz"
+
+    # --- FireHOL Collections ---
     "CINS Score|https://cinsscore.com/list/ci-badguys.txt"
     "Botvrij IOC|http://www.botvrij.eu/data/ioclist.ip-dst.raw"
     "CyberCrime|https://iplists.firehol.org/files/cybercrime.ipset"
     "MyIP (FireHOL)|https://iplists.firehol.org/files/myip.ipset"
+    "FireHOL Level 1|https://iplists.firehol.org/files/firehol_level1.netset"
+    "SBLAM|https://iplists.firehol.org/files/sblam.ipset"
+    "FireHOL Webclient|https://iplists.firehol.org/files/firehol_webclient.netset"
+    "FireHOL Level 2|https://iplists.firehol.org/files/firehol_level2.netset"
+    "BotScout 7d|https://iplists.firehol.org/files/botscout_7d.ipset"
 )
 
 manage_log_size() {
@@ -80,11 +101,8 @@ trap cleanup EXIT INT TERM
 HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
 mkdir -p "$BASE_DIR" "$CONFIG_DIR" "$BACKUP_DIR" /tmp/firewall-blocklists
 
-# --- IPv6 KERNEL CHECK ---
 check_ipv6_stack() {
-    # Check if Kernel supports IPv6 at all
     if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi
-    # Check if tools are present
     if ! command -v ip6tables >/dev/null; then return 1; fi
     return 0
 }
@@ -138,30 +156,23 @@ repair_environment() {
 # --- CROWDSEC API RESCUE ---
 fix_crowdsec_api() {
     log "🚑 CrowdSec API Rescue Mode..."
-    
     local API_PORT=0
     for (( p=42000; p<=42010; p++ )); do
         if ! ss -tuln | grep -q ":$p "; then API_PORT=$p; break; fi
     done
-    
     if [[ $API_PORT -eq 0 ]]; then 
         warn "❌ Fatal: Could not find free port in 42000-42010 range."
         return 1
     fi
-    
     log "🔍 Selected CrowdSec API Port: $API_PORT (Localhost Only)"
-    
     sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml
     sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/local_api_credentials.yaml
-    
     if [[ -f "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml" ]]; then
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
         log "🔧 Updated Bouncer config to Port $API_PORT"
     fi
-    
     if ! cscli machines list -o json 2>/dev/null | grep -q "login"; then
         log "Regenerating machine credentials..."
-        # FIX: Ensure clean file write
         cscli machines add --auto --force --file /etc/crowdsec/local_api_credentials.yaml || true
     fi
 }
@@ -225,7 +236,6 @@ SERV
         if ! grep -q "type: endlessh" /etc/crowdsec/acquis.yaml 2>/dev/null; then
             echo " -> Adding Sensor config to CrowdSec..."
             cp /etc/crowdsec/acquis.yaml /etc/crowdsec/acquis.yaml.bak 2>/dev/null || true
-            
             echo "" >> /etc/crowdsec/acquis.yaml
             if [[ -s /etc/crowdsec/acquis.yaml ]]; then echo "---" >> /etc/crowdsec/acquis.yaml; fi
             cat <<YAML >> /etc/crowdsec/acquis.yaml
@@ -235,9 +245,7 @@ filenames:
 labels:
   type: endlessh
 YAML
-            
             rm -f /usr/lib/crowdsec/plugins/* 2>/dev/null || true
-
             if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
                 systemctl restart crowdsec
                 echo "✅ Sensors Configured."
@@ -287,7 +295,6 @@ menu_lists() {
     local current_content=$(cat "$SOURCE_FILE")
     local new_content=""
     echo "Select lists to ENABLE (y) or DISABLE (n/Enter):"
-    
     for entry in "${RECOMMENDED_LISTS[@]}"; do
         local name="${entry%%|*}"
         local url="${entry#*|}"
@@ -336,25 +343,15 @@ smart_extract() {
 download_lists() {
   local out="$1"; shift; local srcs=("$@")
   : > "$TMPDIR/merge.lst"
-  [[ ${#srcs[@]} -eq 0 ]] && touch "$out" && return 0
-  export -f smart_extract; export TMPDIR
-
   for u in "${srcs[@]}"; do
       local f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
-      if [[ $DRY_RUN -eq 0 ]]; then echo -n "."; fi 
-      
       if curl -sfL --connect-timeout 10 --retry 1 -A "$USER_AGENT" "$u" -o "$TMPDIR/$f"; then
           if [[ -s "$TMPDIR/$f" ]]; then
-              tr -d "\r" < "$TMPDIR/$f" > "$TMPDIR/$f.tmp" && mv "$TMPDIR/$f.tmp" "$TMPDIR/$f"
-              if ! head -n 1 "$TMPDIR/$f" | grep -qiE "<!DOCTYPE|<html"; then
-                   smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true
-                   echo "" >> "$TMPDIR/merge.lst"
-              fi
+              smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true
+              echo "" >> "$TMPDIR/merge.lst"
           fi
       fi
   done
-  if [[ $DRY_RUN -eq 0 ]]; then echo ""; fi
-
   sed -i 's/[#;].*//g' "$TMPDIR/merge.lst"
   sort -u "$TMPDIR/merge.lst" > "$out"
 }
@@ -365,9 +362,7 @@ extract_ips() {
     if [[ "$family" == "inet" ]]; then
         grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" | awk -F'[./]' '{valid=1; for(i=1;i<=4;i++)if($i>255)valid=0; if(NF>4&&$NF>32)valid=0; if(valid)print $0}' | grep -vE "^0\.0\.0\.0$" > "$output" || true
     else
-        if [[ $IPV6_ENABLED -eq 1 ]]; then
-            grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$input" | grep -vE "^::" > "$output" || true
-        else touch "$output"; fi
+        grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$input" | grep -vE "^::" > "$output" || true
     fi
 }
 
@@ -375,29 +370,20 @@ load_ipset() {
   local file="$1"; local setname="$2"; local family="$3"
   if [[ "$family" == "inet6" && $IPV6_ENABLED -eq 0 ]]; then return 0; fi
   ipset create $setname hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist 2>/dev/null || true
-  
-  if [[ ! -s "$file" ]]; then
-      ipset flush $setname 2>/dev/null || true
-      return 0
-  fi
-  
+  if [[ ! -s "$file" ]]; then ipset flush $setname 2>/dev/null || true; return 0; fi
   ipset flush "${setname}_tmp" 2>/dev/null || ipset create "${setname}_tmp" hash:net family $family hashsize $IPSET_HASH_SIZE maxelem $IPSET_MAX_ELEM -exist
-  
   if ! sed "s/^/add ${setname}_tmp /" "$file" | ipset restore -! 2>/dev/null; then
-      warn "Some IPs in $file were invalid and skipped by ipset (non-fatal)."
+      warn "Partial ipset restore for $setname"
   fi
-  
   ipset swap "${setname}_tmp" "$setname"
   ipset destroy "${setname}_tmp" 2>/dev/null || true
 }
 
 update_dyndns() {
   [[ -z "$DYNDNS_HOST" ]] && return 0
-  if [[ $DRY_RUN -eq 1 ]]; then dry "DynDNS Update: $DYNDNS_HOST"; return; fi
   local ip=$(dig +short "$DYNDNS_HOST" | head -n1 || true)
   if [[ -n "$ip" ]]; then
      local t="$IPSET_WL"; [[ "$ip" =~ : ]] && t="${IPSET_WL}_v6"
-     [[ "$t" == "${IPSET_WL}_v6" && $IPV6_ENABLED -eq 0 ]] && return
      ipset add "$t" "$ip" -exist 2>/dev/null || true
   fi
 }
@@ -417,13 +403,7 @@ main() {
   fi
   
   check_connectivity
-  if check_ipv6_stack; then 
-      IPV6_ENABLED=1
-      log "ℹ️ IPv6 Support detected (Kernel)."
-  else 
-      IPV6_ENABLED=0
-      log "ℹ️ No IPv6 Support detected (Kernel). Skipping IPv6."
-  fi
+  if check_ipv6_stack; then IPV6_ENABLED=1; log "ℹ️ IPv6 Support detected (Kernel)."; else IPV6_ENABLED=0; log "ℹ️ No IPv6 Support detected. Skipping."; fi
   
   local cnt_old_v4=$(get_set_count "$IPSET_BL")
   local cnt_old_v6=$(get_set_count "${IPSET_BL}_v6")
@@ -439,7 +419,6 @@ main() {
 
   local bl=(); [[ -f "$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "$CONFIG_DIR/blocklist.sources" || true)
   for c in $BLOCKLIST_COUNTRIES; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
-  
   download_lists "$TMPDIR/bl_raw.lst" "${bl[@]}"
   
   local line_count=$(wc -l < "$TMPDIR/bl_raw.lst" || echo 0)
@@ -461,31 +440,22 @@ main() {
   load_ipset "$TMPDIR/bl_final.v6" "${IPSET_BL}_v6" "inet6"
 
   if [[ $DRY_RUN -eq 0 ]]; then
-      # --- HOST PROTECTION (INPUT) ---
-      iptables -C INPUT -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || \
-      iptables -I INPUT -m set --match-set "$IPSET_BL" src -j DROP
-      
-      # --- DOCKER PROTECTION (DOCKER-USER) ---
+      iptables -C INPUT -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set "$IPSET_BL" src -j DROP
       if iptables -L DOCKER-USER >/dev/null 2>&1; then
-          iptables -C DOCKER-USER -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || \
-          iptables -I DOCKER-USER -m set --match-set "$IPSET_BL" src -j DROP
+          iptables -C DOCKER-USER -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || iptables -I DOCKER-USER -m set --match-set "$IPSET_BL" src -j DROP
       fi
-
       if [[ $IPV6_ENABLED -eq 1 ]]; then
           command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP; }
       fi
       if command -v crowdsec >/dev/null; then
-          iptables -C INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " 2>/dev/null || \
-          iptables -A INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " --log-level 4
+          iptables -C INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " 2>/dev/null || iptables -A INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " --log-level 4
       fi
   fi
   
   update_dyndns
-
   local cnt_new_v4=$(get_set_count "$IPSET_BL")
   local cnt_new_v6=$(get_set_count "${IPSET_BL}_v6")
   local diff_v4=$((cnt_new_v4 - cnt_old_v4))
-  
   log "Finished [IPv4: $cnt_new_v4 ($diff_v4), IPv6: $cnt_new_v6]"
   if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then send_telegram "🛡️ Update: IPv4 $cnt_new_v4 ($diff_v4)"; fi
 }
