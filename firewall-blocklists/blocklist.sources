@@ -5,6 +5,7 @@ https://www.spamhaus.org/drop/dropv6.txt
 https://feeds.dshield.org/block.txt
 https://feodotracker.abuse.ch/downloads/ipblocklist.txt
 https://sslbl.abuse.ch/blacklist/sslipblacklist.txt
+https://danger.rulez.sk/projects/bruteforceblocker/blist.php
 
 # --- Aggregators ---
 https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt
@@ -35,6 +36,10 @@ https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds
 https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/alienvault.txt
 https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/compromised-ips.txt
 https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/illuminate.txt
+https://feodotracker.abuse.ch/downloads/ipblocklist.csv
+https://tracker.viriback.com/last30.php
+https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
+https://sslbl.abuse.ch/blacklist/sslbl.rpz
 
 # --- FireHOL Collections ---
 https://cinsscore.com/list/ci-badguys.txt
