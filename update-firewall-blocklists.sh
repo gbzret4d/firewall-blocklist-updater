@@ -4,13 +4,13 @@ export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # --- VERSION CONTROL ---
-SCRIPT_VERSION="v11.6"
+SCRIPT_VERSION="v11.7"
 
 #################################################
-# Firewall Blocklist Updater (v11.6 - Ultimate List)
-# - CONFIG: Massive update to 43 Sources (RPZ, CSV, TXT mixed)
-# - FEAT: Smart IPv6 & Docker Protection (DOCKER-USER)
-# - FIX: API Rescue & Auto-Repair
+# Firewall Blocklist Updater (v11.7 - Ultimate List)
+# - CONFIG: 43 Sources (High Confidence, Threat Intel, C2, Aggregators)
+# - FEAT: Smart IPv6 (Kernel Check) & Docker Protection (DOCKER-USER)
+# - FIX: API Rescue, Hostname Repair, Atomic IPSet Swapping
 #################################################
 
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -28,7 +28,7 @@ DRY_RUN=0
 IPV6_ENABLED=1
 USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-# --- DEINE NEUE LISTE (43 Quellen) ---
+# --- 43 QUELLEN (Deine Liste) ---
 RECOMMENDED_LISTS=(
     # --- High Confidence ---
     "Spamhaus DROP|https://www.spamhaus.org/drop/drop.txt"
@@ -119,17 +119,8 @@ load_env_vars
 perform_auto_update() {
   if [[ "${1:-}" == "--post-update" ]]; then log "[AUTO-UPDATE] Update to $SCRIPT_VERSION successful."; return 0; fi
   if [[ $DRY_RUN -eq 1 ]]; then return 0; fi
-  local tmp="/tmp/update-fw.sh.new"
-  if curl -sfL -A "$USER_AGENT" -o "$tmp" "${REPO_RAW_URL}?t=$(date +%s)" || true; then
-     if [[ -s "$tmp" ]]; then
-         local remote_ver=$(grep -oE 'SCRIPT_VERSION="v[0-9.]+"' "$tmp" | head -n1 | cut -d'"' -f2 || echo "unknown")
-         if [[ "$remote_ver" != "unknown" && "$remote_ver" != "$SCRIPT_VERSION" ]]; then
-            log "[AUTO-UPDATE] New version found ($remote_ver). Updating..."
-            cp "$tmp" "/usr/local/bin/update-firewall-blocklists.sh" && chmod +x "/usr/local/bin/update-firewall-blocklists.sh"
-            exec "/usr/local/bin/update-firewall-blocklists.sh" "--post-update"
-         fi
-     fi
-  fi
+  # DISABLED AUTO-UPDATE TO PROTECT YOUR CUSTOM LISTS FROM BEING OVERWRITTEN
+  return 0
 }
 
 check_connectivity() {
