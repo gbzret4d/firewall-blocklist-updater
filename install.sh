@@ -2,17 +2,16 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v17.0 - CONFIG SYNTHESIZER) ---
-# - FIX: Generates valid minimal configuration files before first start
-# - FIX: Prevents "acquis.yaml missing/empty" crash loop
-# - LOGIC: Robust Port Handling + Nuclear Reset
+# --- Firewall & Sensor Installer (v17.1 - SYSTEMD SYNTAX FIX) ---
+# - FIX: Removed invalid '-error' flag from systemd ExecStartPre (caused exit code 2)
+# - LOGIC: Robust Port Handling + Nuclear Reset + Config Synthesis
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.0"
+INSTALLER_VERSION="v17.1"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION ---
@@ -134,7 +133,7 @@ CURRENT_TASK="CrowdSec Setup"
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
-# Harden Service
+# Harden Service (FIXED SYNTAX)
 harden_crowdsec_service() {
     echo "🛡️ Hardening CrowdSec Systemd Service..."
     cat <<SERVICE > /lib/systemd/system/crowdsec.service
@@ -146,7 +145,7 @@ After=syslog.target network.target remote-fs.target nss-lookup.target
 Type=notify
 Environment=LC_ALL=C LANG=C
 PIDFile=/var/run/crowdsec.pid
-ExecStartPre=/usr/bin/crowdsec -c /etc/crowdsec/config.yaml -t -error
+ExecStartPre=/usr/bin/crowdsec -c /etc/crowdsec/config.yaml -t
 ExecStart=/usr/bin/crowdsec -c /etc/crowdsec/config.yaml
 Restart=always
 RestartSec=5s
