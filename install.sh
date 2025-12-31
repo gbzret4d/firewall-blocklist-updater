@@ -2,11 +2,12 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v14.6 - PRODUCTION FINAL) ---
-# - FIX: Populates blocklist.sources (Solves "0 IPs found")
-# - FIX: Split CrowdSec Install (Solves race conditions)
-# - FIX: Silent Mode (No "needrestart" popups)
-# - FEAT: Full Endlessh & System Hardening
+# --- Firewall & Sensor Installer (v14.7 - SILENT & GEO-AWARE) ---
+# - MODE: Silent on Success, Loud on Failure
+# - FEAT: Telegram Alerts now include Public IP & Country (ISO)
+# - FIX: Populates blocklist.sources with 43 URLs
+# - FIX: Split CrowdSec Install (Race condition fix)
+# - COMPAT: Debian/Ubuntu/RHEL/CentOS/Rocky/Alma/Fedora
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
@@ -22,22 +23,45 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 # --- 0. HELPER FUNCTIONS ---
+
+# Ermittelt IP und Land für die Fehlermeldung
+get_server_identity() {
+    # Default values
+    SERVER_IP="Unknown"
+    SERVER_CC="??"
+    
+    # Try to fetch info (max 3 seconds to not hang on error)
+    if command -v curl >/dev/null; then
+        local INFO=$(curl -s --max-time 3 http://ip-api.com/csv/?fields=query,countryCode || true)
+        if [[ -n "$INFO" ]]; then
+            SERVER_IP=$(echo "$INFO" | cut -d',' -f1)
+            SERVER_CC=$(echo "$INFO" | cut -d',' -f2)
+        fi
+    fi
+}
+
 send_msg() {
+    local message="$1"
     if [[ -n "$TG_TOKEN" && -n "$TG_CHAT" ]]; then
         curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
-            -d chat_id="$TG_CHAT" -d text="$1" -d parse_mode="HTML" >/dev/null || true
+            -d chat_id="$TG_CHAT" -d text="$message" -d parse_mode="HTML" >/dev/null || true
     fi
 }
 
 handle_error() {
     local line=$1
     echo "❌ CRITICAL ERROR at line $line during task: '$CURRENT_TASK'"
-    send_msg "🚨 <b>INSTALL CRASHED</b> on <code>$(hostname)</code>%0A%0A<b>Task:</b> $CURRENT_TASK%0A<b>Line:</b> $line%0A<b>OS:</b> $(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1)%0A%0APlease forward this message."
+    
+    # Gather Info before sending
+    get_server_identity
+    local OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"')
+    
+    send_msg "🚨 <b>INSTALL CRASHED</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A<b>Task:</b> $CURRENT_TASK%0A<b>Line:</b> $line%0A%0APlease check logs manually."
 }
 trap 'handle_error $LINENO' ERR
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v14.6)     "
+echo "   FIREWALL & CROWDSEC INSTALLER (v14.7)     "
 echo "============================================="
 
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
@@ -68,24 +92,27 @@ if command -v apt-get >/dev/null; then
     PM="apt-get"
     update_repo() { wait_for_apt; apt-get update -qq; }
     install_pkg() { wait_for_apt; apt-get install -y "$@" || (sleep 5; wait_for_apt; apt-get install -y "$@"); }
+    
 elif command -v dnf >/dev/null; then
     echo "🔍 Detected: RHEL 8+ / Rocky / Alma / Fedora"
     PM="dnf"
     update_repo() { :; }
     install_pkg() { dnf install -y "$@"; }
     dnf install -y epel-release || true
+
 elif command -v yum >/dev/null; then
     echo "🔍 Detected: Legacy CentOS / RHEL 7"
     PM="yum"
     update_repo() { :; }
     install_pkg() { yum install -y "$@"; }
     yum install -y epel-release || true
+
 else
     echo "❌ CRITICAL: Unsupported OS."
     exit 1
 fi
 
-# --- 2. INSTALL DEPENDENCIES ---
+# --- 2. INSTALL DEPENDENCIES & TIME SYNC ---
 CURRENT_TASK="Installing Base Dependencies"
 echo ">>> 1. INSTALLING DEPENDENCIES via $PM..."
 
@@ -94,7 +121,6 @@ install_pkg curl ipset iptables unzip file gnupg logrotate endlessh
 
 if [[ "$PM" == "apt-get" ]]; then
     install_pkg dnsutils apt-transport-https psmisc
-    # Ubuntu 24.04 compatibility
     if ! apt-get install -y iproute2; then apt-get install -y iproute; fi
     systemctl enable --now systemd-timesyncd 2>/dev/null || install_pkg chrony
 else
@@ -160,7 +186,6 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
             curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.rpm.sh | bash 2>/dev/null
         fi
         
-        # FIX: Install Core FIRST, wait, then Bouncer
         install_pkg crowdsec
         echo "⏳ Waiting for CrowdSec Core initialization..."
         sleep 10
@@ -437,7 +462,7 @@ cat <<LOG > /etc/logrotate.d/firewall-blocklist-updater
 }
 LOG
 
-# --- FIX: POPULATE BLOCKLIST SOURCES (Solves 0 IPs issue) ---
+# --- POPULATE BLOCKLIST SOURCES (Fix for 0 IPs) ---
 cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 https://www.spamhaus.org/drop/drop.txt
 https://www.spamhaus.org/drop/edrop.txt
@@ -561,7 +586,7 @@ CURRENT_TASK="Running Initial Update"
 echo ">>> 6. RUNNING INITIAL UPDATE..."
 $INSTALL_DIR/update-firewall-blocklists.sh
 
-# --- 7. HEALTH CHECK ---
+# --- 7. FINAL HEALTH CHECK ---
 CURRENT_TASK="Final Diagnostics"
 echo ">>> 7. FINAL HEALTH CHECK..."
 FAILED_SERVICES=""
@@ -576,11 +601,16 @@ if command -v iptables >/dev/null && iptables -L DOCKER-USER >/dev/null 2>&1; th
         echo "✅ Docker Protection: OK"
     else
         echo "⚠️ Docker Protection: Rule Missing (Check logs)"
+        FAILED_SERVICES+="- Docker Firewall Rule Missing%0A"
     fi
 fi
 
 if [[ -n "$FAILED_SERVICES" ]]; then
-    send_msg "⚠️ <b>INSTALL WARNING</b> on <code>$(hostname)</code>%0A%0AThe following services failed:%0A$FAILED_SERVICES"
+    # Gather Info before sending
+    get_server_identity
+    local OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"')
+    
+    send_msg "⚠️ <b>INSTALL WARNING</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A%0AThe following services failed:%0A$FAILED_SERVICES"
     echo "⚠️ Warnings sent to Telegram."
 else
     echo "✅ INSTALLATION COMPLETE!"
