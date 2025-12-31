@@ -2,11 +2,11 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v14.8 - STABLE FIX) ---
-# - FIX: Removed 'local' keyword from global scope (Fixed crash at end)
-# - FIX: Force restart CrowdSec before health check (Fixed "CrowdSec FAIL")
-# - FEAT: Silent on Success, Geo-Aware Error Reporting
-# - COMPAT: Debian/Ubuntu/RHEL/CentOS/Rocky/Alma/Fedora
+# --- Firewall & Sensor Installer (v15.0 - HIGH PORT STANDARD) ---
+# - CHANGE: Default LAPI Port moved from 8080 to random free port (42000+)
+# - LOGIC: Proactive Port Check (scans 42000-42100) before config
+# - FEAT: Silent Success, Geo-Aware Failure Reports
+# - COMPAT: Universal (Ubuntu 24.04 + Legacy Systems)
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
@@ -46,16 +46,28 @@ send_msg() {
 handle_error() {
     local line=$1
     echo "❌ CRITICAL ERROR at line $line during task: '$CURRENT_TASK'"
-    
     get_server_identity
     local OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"')
-    
     send_msg "🚨 <b>INSTALL CRASHED</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A<b>Task:</b> $CURRENT_TASK%0A<b>Line:</b> $line%0A%0APlease check logs manually."
 }
 trap 'handle_error $LINENO' ERR
 
+# --- INTELLIGENT PORT FINDER ---
+get_free_high_port() {
+    local port=42000
+    # Loop until we find a free port
+    while ss -tuln | grep -q ":$port " || ss -tuln | grep -q ":$port$"; do
+        ((port++))
+        if [[ $port -gt 42100 ]]; then
+            echo "8080" # Fallback (should never happen on normal servers)
+            return
+        fi
+    done
+    echo "$port"
+}
+
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v14.8)     "
+echo "   FIREWALL & CROWDSEC INSTALLER (v15.0)     "
 echo "============================================="
 
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
@@ -161,7 +173,7 @@ TIME
 systemctl daemon-reload
 systemctl enable --now daily-system-cleanup.timer
 
-# --- 4. CROWDSEC SETUP (SPLIT INSTALL) ---
+# --- 4. CROWDSEC SETUP (HIGH PORT) ---
 CURRENT_TASK="CrowdSec Setup"
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
@@ -177,10 +189,33 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
             curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.rpm.sh | bash 2>/dev/null
         fi
         
+        # 1. Determine Port BEFORE installing/configuring
+        TARGET_PORT=$(get_free_high_port)
+        echo " -> Selected Secure Port: $TARGET_PORT"
+        
+        # 2. Install Package
         install_pkg crowdsec
+        
+        # 3. Stop immediately to apply config
+        systemctl stop crowdsec
+        
+        # 4. Apply Port Config
+        sed -i "s/127.0.0.1:8080/127.0.0.1:$TARGET_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
+        sed -i "s/127.0.0.1:8080/127.0.0.1:$TARGET_PORT/g" /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
+        
+        # 5. Start Core
+        systemctl start crowdsec
         echo "⏳ Waiting for CrowdSec Core initialization..."
         sleep 10
+        
+        # 6. Install Bouncer (it might fail connection initially due to port, we fix config after)
         install_pkg crowdsec-firewall-bouncer-iptables
+        
+        # 7. Update Bouncer Config with new Port
+        if [[ -f "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml" ]]; then
+            sed -i "s/127.0.0.1:8080/127.0.0.1:$TARGET_PORT/g" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+            systemctl restart crowdsec-firewall-bouncer
+        fi
     fi
 
     rm -f /usr/lib/crowdsec/plugins/{dummy,install.sh,update-firewall-blocklists.sh} 2>/dev/null || true
@@ -250,6 +285,7 @@ YAML
         fi
     fi
     
+    # Ensure bouncer is installed and started
     if ! command -v crowdsec-firewall-bouncer >/dev/null; then
         install_pkg crowdsec-firewall-bouncer-iptables
     fi
@@ -453,7 +489,7 @@ cat <<LOG > /etc/logrotate.d/firewall-blocklist-updater
 }
 LOG
 
-# --- POPULATE BLOCKLIST SOURCES (Fix for 0 IPs) ---
+# --- POPULATE BLOCKLIST SOURCES ---
 cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 https://www.spamhaus.org/drop/drop.txt
 https://www.spamhaus.org/drop/edrop.txt
@@ -596,9 +632,7 @@ if command -v iptables >/dev/null && iptables -L DOCKER-USER >/dev/null 2>&1; th
     if iptables -C DOCKER-USER -m set --match-set blocklist_all src -j DROP 2>/dev/null; then
         echo "✅ Docker Protection: OK"
     else
-        # Not always a critical error, but worth a warning
         echo "⚠️ Docker Protection: Rule Missing (Check logs)"
-        # FAILED_SERVICES+="- Docker Firewall Rule Missing%0A" 
     fi
 fi
 
