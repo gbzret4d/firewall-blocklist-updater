@@ -2,16 +2,17 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v17.1 - SYSTEMD SYNTAX FIX) ---
-# - FIX: Removed invalid '-error' flag from systemd ExecStartPre (caused exit code 2)
-# - LOGIC: Robust Port Handling + Nuclear Reset + Config Synthesis
+# --- Firewall & Sensor Installer (v17.3 - VERBOSE CONSOLE / SILENT TELEGRAM) ---
+# - BEHAVIOR: Terminal shows EVERYTHING. Telegram shows ONLY ERRORS.
+# - FIX: Updater script includes Hostname/IP in error messages.
+# - LOGIC: Nuclear Reset + Port Rotation + Config Synthesis.
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.1"
+INSTALLER_VERSION="v17.3"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION ---
@@ -23,7 +24,7 @@ BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-}"
 TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
-# --- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS (INSTALLER) ---
 get_server_identity() {
     SERVER_IP="Unknown"; SERVER_CC="??"
     if command -v curl >/dev/null; then
@@ -45,6 +46,8 @@ handle_error() {
     local LOG_TAIL=""; if command -v journalctl >/dev/null; then LOG_TAIL=$(journalctl -u crowdsec -n 10 --no-pager 2>/dev/null | tail -n 10); fi
     get_server_identity
     local OS_NAME="Unknown"; if [ -f /etc/os-release ]; then OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"'); fi
+    
+    # TELEGRAM: ONLY ON ERROR
     send_msg "🚨 <b>INSTALL CRASHED</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A<b>Task:</b> $CURRENT_TASK%0A<b>Line:</b> $line%0A%0A<b>Log Context:</b>%0A<pre>$LOG_TAIL</pre>"
 }
 trap 'handle_error $LINENO' ERR
@@ -133,7 +136,6 @@ CURRENT_TASK="CrowdSec Setup"
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
-# Harden Service (FIXED SYNTAX)
 harden_crowdsec_service() {
     echo "🛡️ Hardening CrowdSec Systemd Service..."
     cat <<SERVICE > /lib/systemd/system/crowdsec.service
@@ -158,22 +160,11 @@ SERVICE
     systemctl daemon-reload
 }
 
-# GENERATE VALID CONFIGS IF MISSING
 synthesize_configs() {
     echo "🛠️ Synthesizing base configuration..."
     mkdir -p /etc/crowdsec
-    
-    # Ensure acquis.yaml exists and is valid
     if [[ ! -s /etc/crowdsec/acquis.yaml ]]; then
-        cat <<ACQUIS > /etc/crowdsec/acquis.yaml
-filenames:
-  - /var/log/syslog
-  - /var/log/auth.log
-  - /var/log/messages
-labels:
-  type: syslog
----
-ACQUIS
+        echo -e "filenames:\n  - /var/log/syslog\n  - /var/log/auth.log\n  - /var/log/messages\nlabels:\n  type: syslog\n---" > /etc/crowdsec/acquis.yaml
     fi
 }
 
@@ -186,11 +177,8 @@ purge_crowdsec() {
 }
 
 configure_and_start_crowdsec() {
-    # 1. Harden & Prepare
     harden_crowdsec_service
     synthesize_configs
-    
-    # 2. Brutal Cleanup
     systemctl stop crowdsec || true
     pkill -9 crowdsec || true
     sleep 2
@@ -206,12 +194,10 @@ configure_and_start_crowdsec() {
         
         if [[ ! -f "$CONFIG_FILE" ]]; then install_pkg crowdsec; harden_crowdsec_service; synthesize_configs; fi
 
-        # Force Port Update
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
         find /etc/crowdsec/bouncers/ -name "*.yaml" -exec sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" {} + 2>/dev/null || true
         
-        # Try Start
         if systemctl start crowdsec; then
             sleep 5
             if systemctl is-active --quiet crowdsec; then
@@ -237,7 +223,6 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         install_pkg crowdsec
     fi
     
-    # 1. Run the Rotation Loop
     if ! configure_and_start_crowdsec; then
         echo "❌ First pass failed. Initiating NUCLEAR RESET..."
         purge_crowdsec
@@ -248,16 +233,13 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         fi
     fi
     
-    # 2. Wait for API Ready
     CURRENT_TASK="Waiting for API"
     for i in {1..20}; do
         if cscli lapi status >/dev/null 2>&1; then break; fi
         sleep 2
     done
 
-    # 3. Install Bouncer
     if ! command -v crowdsec-firewall-bouncer >/dev/null; then
-        CURRENT_TASK="Installing Bouncer"
         install_pkg crowdsec-firewall-bouncer-iptables
         configure_and_start_crowdsec
     fi
@@ -273,9 +255,7 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         if command -v docker >/dev/null; then cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true; fi
     fi
 
-    if [[ -n "$CS_ENROLL" ]]; then
-        cscli console enroll "$CS_ENROLL" --overwrite || true
-    fi
+    if [[ -n "$CS_ENROLL" ]]; then cscli console enroll "$CS_ENROLL" --overwrite || true; fi
 
     if [[ -n "$ABUSE_KEY" ]]; then
         mkdir -p /etc/crowdsec/notifications
@@ -354,8 +334,21 @@ check_ipv6_stack() { if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi; if ! c
 load_env_vars() { if [[ -f "$KEYFILE" ]]; then set +u; set -a; source "$KEYFILE"; set +a; set -u; fi; }
 perform_auto_update() { return 0; }
 check_connectivity() { if ! curl -s --head --request GET https://1.1.1.1 > /dev/null; then echo "No internet."; exit 0; fi; }
-send_telegram() { if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" -d chat_id="$TELEGRAM_CHAT_ID" -d text="$1" -d parse_mode="HTML" >/dev/null || true; fi; }
 repair_environment() { local HN=$(hostname); if ! grep -q "127.0.1.1 $HN" /etc/hosts; then echo "127.0.1.1 $HN" >> /etc/hosts; fi; }
+
+# UPDATER IDENTITY LOGIC (For Error Messages Only)
+get_identity() {
+    HN=$(hostname)
+    IP=$(curl -s --max-time 2 http://ip-api.com/csv/?fields=query | cut -d',' -f1 || echo "Unknown-IP")
+}
+
+send_telegram() { 
+    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then 
+        get_identity
+        local MSG="<b>[$HN] ($IP)</b>%0A$1"
+        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" -d chat_id="$TELEGRAM_CHAT_ID" -d text="$MSG" -d parse_mode="HTML" >/dev/null || true; 
+    fi 
+}
 
 TMPDIR="/tmp/firewall-blocklists"
 IPSET_WL="allowed_whitelist"; IPSET_BL="blocklist_all"
@@ -426,7 +419,8 @@ main() {
   fi
   update_dyndns
   local cnt_new_v4=$(get_set_count "$IPSET_BL"); local diff_v4=$((cnt_new_v4 - cnt_old_v4))
-  log "Finished [IPv4: $cnt_new_v4 ($diff_v4)]"; if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then send_telegram "🛡️ Update: IPv4 $cnt_new_v4 ($diff_v4)"; fi
+  log "Finished [IPv4: $cnt_new_v4 ($diff_v4)]"
+  # SILENT SUCCESS: NO TELEGRAM HERE
 }
 main "${1:-}"
 EOF_UPDATER
