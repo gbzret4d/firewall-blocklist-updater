@@ -2,16 +2,17 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v16.7 - LOOP FIX) ---
-# - FIX: Critical Bash Arithmetic Bug ((i++)) returning 1 causing set -e exit
-# - LOGIC: Port Rotation now guaranteed to continue past first failure
+# --- Firewall & Sensor Installer (v16.8 - NUCLEAR OPTION) ---
+# - FEAT: Auto-Purge & Reinstall if startup loop fails completely
+# - DEBUG: Runs 'crowdsec -t' to show config errors in terminal
+# - LOGIC: Hard overrides for LAPI credentials (no more sed guessing)
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v16.7"
+INSTALLER_VERSION="v16.8"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION ---
@@ -70,11 +71,14 @@ if command -v apt-get >/dev/null; then
     PM="apt-get"
     update_repo() { wait_for_apt; apt-get update -qq; }
     install_pkg() { wait_for_apt; apt-get install -y "$@" || (sleep 5; apt-get install -y "$@"); }
+    purge_pkg() { wait_for_apt; apt-get purge -y "$@"; apt-get autoremove -y; }
 elif command -v dnf >/dev/null; then
     PM="dnf"; update_repo() { :; }; install_pkg() { dnf install -y "$@"; }
+    purge_pkg() { dnf remove -y "$@"; }
     dnf install -y epel-release || true
 elif command -v yum >/dev/null; then
     PM="yum"; update_repo() { :; }; install_pkg() { yum install -y "$@"; }
+    purge_pkg() { yum remove -y "$@"; }
     yum install -y epel-release || true
 else echo "❌ Unsupported OS"; exit 1; fi
 
@@ -125,10 +129,18 @@ TIME
 systemctl daemon-reload
 systemctl enable --now daily-system-cleanup.timer
 
-# --- 4. CROWDSEC SETUP (FIXED LOOP ARITHMETIC) ---
+# --- 4. CROWDSEC SETUP (NUCLEAR RESILIENCE) ---
 CURRENT_TASK="CrowdSec Setup"
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
+
+purge_crowdsec() {
+    echo "☢️ PURGING CrowdSec installation (Clean Slate)..."
+    systemctl stop crowdsec || true
+    purge_pkg crowdsec crowdsec-firewall-bouncer-iptables
+    rm -rf /etc/crowdsec /var/lib/crowdsec /var/log/crowdsec
+    CS_INSTALLED=false
+}
 
 configure_and_start_crowdsec() {
     # Brutal Cleanup
@@ -137,48 +149,46 @@ configure_and_start_crowdsec() {
     sleep 2
 
     local CONFIG_FILE="/etc/crowdsec/config.yaml"
-    local CURRENT_PORT=""
-    if [[ -f "$CONFIG_FILE" ]]; then
-        CURRENT_PORT=$(grep "listen_uri:" "$CONFIG_FILE" | awk -F':' '{print $3}' | tr -d ' ' || true)
-    fi
-
-    # Start loop from 42000 or existing port
-    local START_PORT=42000
-    if [[ -n "$CURRENT_PORT" && "$CURRENT_PORT" -ge 42000 ]]; then START_PORT=$CURRENT_PORT; fi
-    
     local ATTEMPT=0
     local MAX_ATTEMPTS=6
+    local START_PORT=42000
     
     while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
         local TEST_PORT=$((START_PORT + ATTEMPT))
-        echo "🔧 Trying to bind CrowdSec to Port: $TEST_PORT (Attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)"
+        echo "🔧 Config Attempt on Port: $TEST_PORT ($((ATTEMPT+1))/$MAX_ATTEMPTS)"
         
-        # Apply Config
+        # Validate Config exists
+        if [[ ! -f "$CONFIG_FILE" ]]; then echo "❌ Config missing! Reinstalling..."; install_pkg crowdsec; fi
+
+        # Force Port Update using blanket replacement of any localhost port
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
         find /etc/crowdsec/bouncers/ -name "*.yaml" -exec sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" {} + 2>/dev/null || true
         
-        # Try Start (With error suppression)
+        # TEST CONFIG BEFORE START
+        if ! crowdsec -c /etc/crowdsec/config.yaml -t 2>&1 | grep -q "Configuration is valid"; then
+            echo "⚠️ Configuration invalid. Dumping errors:"
+            crowdsec -c /etc/crowdsec/config.yaml -t || true
+        fi
+
+        # Try Start
         if systemctl start crowdsec 2>/dev/null; then
             sleep 5
             if systemctl is-active --quiet crowdsec; then
                 if cscli lapi status >/dev/null 2>&1; then
-                    echo "✅ CrowdSec started successfully on port $TEST_PORT."
+                    echo "✅ CrowdSec LIVE on port $TEST_PORT."
                     return 0
                 fi
             fi
         fi
         
-        echo "⚠️ Failed to start on port $TEST_PORT. Rotating..."
+        echo "⚠️ Start failed on $TEST_PORT. Rotating..."
         systemctl stop crowdsec || true
         pkill -9 crowdsec || true
-        
-        # FIX: Safe arithmetic that won't trigger 'set -e'
         ATTEMPT=$((ATTEMPT + 1))
     done
     
-    echo "❌ CRITICAL: Could not start CrowdSec after trying $MAX_ATTEMPTS ports."
-    exit 1
+    return 1 # Failed all attempts
 }
 
 if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
@@ -189,7 +199,15 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
     fi
     
     # 1. Run the Rotation Loop
-    configure_and_start_crowdsec
+    if ! configure_and_start_crowdsec; then
+        echo "❌ First pass failed. Initiating NUCLEAR RESET..."
+        purge_crowdsec
+        install_pkg crowdsec
+        if ! configure_and_start_crowdsec; then
+            echo "❌ CRITICAL: Even fresh install failed. Check system logs."
+            exit 1
+        fi
+    fi
     
     # 2. Wait for API Ready
     CURRENT_TASK="Waiting for API"
@@ -375,6 +393,18 @@ main() {
 main "${1:-}"
 EOF_UPDATER
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
+
+cat <<LOG > /etc/logrotate.d/firewall-blocklist-updater
+/var/log/firewall-blocklist-updater.log {
+    daily
+    missingok
+    rotate 7
+    compress
+    delaycompress
+    notifempty
+    create 640 root root
+}
+LOG
 
 # --- POPULATE SOURCES ---
 cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
