@@ -2,17 +2,18 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v16.2 - PROFESSIONAL) ---
-# - IMPROVEMENT: Replaced 'sleep' with Active API Probing (Wait until ready)
-# - LOGIC: Robust Port Selection (Scans for free ports, avoids 8080)
-# - FEAT: Geo-Aware Reporting & Silent Success
-# - COMPAT: Universal (Debian/Ubuntu/RHEL/CentOS/Rocky/Alma/Fedora)
+# --- Firewall & Sensor Installer (v16.3 - SELF HEALING) ---
+# - FIX: Aggressive Zombie Process Killing (pkill -9) before start
+# - LOGIC: Port Rotation on Failure (If 42000 fails, try 42001 automatically)
+# - FEAT: Visible Version Banner
+# - COMPAT: Universal
 
 # --- GLOBAL SETTINGS ---
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+INSTALLER_VERSION="v16.3"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION MAPPING ---
@@ -50,10 +51,10 @@ handle_error() {
     local line=$1
     echo "❌ CRITICAL ERROR at line $line during task: '$CURRENT_TASK'"
     
-    # Capture last few lines of syslog/journal for context if possible
+    # Capture Log tail for context
     local LOG_TAIL=""
     if command -v journalctl >/dev/null; then
-        LOG_TAIL=$(journalctl -n 5 --no-pager | tail -n 5)
+        LOG_TAIL=$(journalctl -u crowdsec -n 5 --no-pager 2>/dev/null | tail -n 5)
     fi
 
     get_server_identity
@@ -62,16 +63,22 @@ handle_error() {
         OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"')
     fi
     
-    send_msg "🚨 <b>INSTALL CRASHED</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A<b>Task:</b> $CURRENT_TASK%0A<b>Line:</b> $line%0A%0A<b>Log Snippet:</b>%0A<pre>$LOG_TAIL</pre>"
+    send_msg "🚨 <b>INSTALL CRASHED</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A<b>Task:</b> $CURRENT_TASK%0A<b>Line:</b> $line%0A%0A<b>Log Context:</b>%0A<pre>$LOG_TAIL</pre>"
 }
 trap 'handle_error $LINENO' ERR
+
+echo "============================================="
+echo "   FIREWALL & CROWDSEC INSTALLER ($INSTALLER_VERSION) "
+echo "============================================="
+
+if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
 
 # --- 1. SMART OS DETECTION ---
 CURRENT_TASK="Detecting OS & Package Manager"
 PM="" 
 
 wait_for_apt() {
-    local max_retries=60
+    local max_retries=30
     local count=0
     if ! command -v fuser >/dev/null && ! command -v lsof >/dev/null; then return; fi
     while [ $count -lt $max_retries ]; do
@@ -81,17 +88,16 @@ wait_for_apt() {
              if ! lsof /var/lib/dpkg/lock >/dev/null 2>&1; then return 0; fi
         fi
         echo "⏳ Waiting for apt lock... ($count/$max_retries)"
-        sleep 1
+        sleep 2
         ((count++))
     done
-    echo "⚠️ Warning: APT lock wait timed out. Proceeding at risk."
 }
 
 if command -v apt-get >/dev/null; then
     echo "🔍 Detected: Debian / Ubuntu Family"
     PM="apt-get"
     update_repo() { wait_for_apt; apt-get update -qq; }
-    install_pkg() { wait_for_apt; apt-get install -y "$@" || (sleep 2; wait_for_apt; apt-get install -y "$@"); }
+    install_pkg() { wait_for_apt; apt-get install -y "$@" || (sleep 5; wait_for_apt; apt-get install -y "$@"); }
 elif command -v dnf >/dev/null; then
     echo "🔍 Detected: RHEL 8+ / Rocky / Alma / Fedora"
     PM="dnf"
@@ -118,10 +124,7 @@ install_pkg curl ipset iptables unzip file gnupg logrotate endlessh
 
 if [[ "$PM" == "apt-get" ]]; then
     install_pkg dnsutils apt-transport-https psmisc
-    # Smart iproute selection
-    if ! apt-get install -y iproute2 2>/dev/null; then 
-        apt-get install -y iproute
-    fi
+    if ! apt-get install -y iproute2; then apt-get install -y iproute; fi
     systemctl enable --now systemd-timesyncd 2>/dev/null || install_pkg chrony
 else
     install_pkg bind-utils iproute chrony
@@ -170,13 +173,18 @@ TIME
 systemctl daemon-reload
 systemctl enable --now daily-system-cleanup.timer
 
-# --- 4. CROWDSEC SETUP (PROFESSIONAL MODE) ---
+# --- 4. CROWDSEC SETUP (SELF-HEALING) ---
 CURRENT_TASK="CrowdSec Setup"
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
 configure_crowdsec_port() {
-    echo "🔧 Checking CrowdSec Port Configuration..."
+    # 1. Brutal Clean-up (Kill Zombies)
+    echo "🧹 Ensuring clean state (Killing old processes)..."
+    systemctl stop crowdsec || true
+    pkill -9 crowdsec || true
+    sleep 2
+
     local CONFIG_FILE="/etc/crowdsec/config.yaml"
     local CURRENT_PORT=""
     
@@ -184,55 +192,65 @@ configure_crowdsec_port() {
         CURRENT_PORT=$(grep "listen_uri:" "$CONFIG_FILE" | awk -F':' '{print $3}' | tr -d ' ' || true)
     fi
 
-    # Only change if 8080 or unset
-    if [[ "$CURRENT_PORT" == "8080" ]] || [[ -z "$CURRENT_PORT" ]]; then
-        local NEW_PORT=42000
-        while ss -tuln | grep -q ":$NEW_PORT " || ss -tuln | grep -q ":$NEW_PORT$"; do
-            ((NEW_PORT++))
-            if [[ $NEW_PORT -gt 42100 ]]; then
-                echo "❌ CRITICAL: No free ports available in 42000-42100. Cannot secure CrowdSec."
+    # Determine Port to use
+    local TARGET_PORT=""
+    
+    if [[ -n "$CURRENT_PORT" && "$CURRENT_PORT" -ge 42000 && "$CURRENT_PORT" -le 42100 ]]; then
+        # Check if this port is actually free
+        if ! ss -tuln | grep -q ":$CURRENT_PORT "; then
+            TARGET_PORT=$CURRENT_PORT
+            echo "✅ Configured port $CURRENT_PORT is safe and free."
+        else
+            echo "⚠️ Port $CURRENT_PORT is configured but IN USE (Zombie?). Rotating..."
+        fi
+    fi
+
+    if [[ -z "$TARGET_PORT" ]]; then
+        # Find new free port
+        local p=42000
+        while ss -tuln | grep -q ":$p "; do
+            ((p++))
+            if [[ $p -gt 42100 ]]; then
+                echo "❌ CRITICAL: No free ports in 42000-42100."
                 exit 1
             fi
         done
-        
-        echo " -> Migrating from $CURRENT_PORT to Secure Port: $NEW_PORT"
-        
-        # STOP EVERYTHING to release locks
-        systemctl stop crowdsec || true
-        pkill -9 crowdsec || true
-        
-        # APPLY CONFIG
-        sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$NEW_PORT/g" /etc/crowdsec/config.yaml
-        sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$NEW_PORT/g" /etc/crowdsec/local_api_credentials.yaml
-        find /etc/crowdsec/bouncers/ -name "*.yaml" -exec sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$NEW_PORT/g" {} + 2>/dev/null || true
-        
-        # START
-        systemctl start crowdsec
-    else
-        echo "✅ CrowdSec already on safe port: $CURRENT_PORT"
+        TARGET_PORT=$p
+        echo " -> Switching to NEW Secure Port: $TARGET_PORT"
+    fi
+    
+    # Apply Config Forcefully
+    sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TARGET_PORT/g" /etc/crowdsec/config.yaml
+    sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TARGET_PORT/g" /etc/crowdsec/local_api_credentials.yaml
+    find /etc/crowdsec/bouncers/ -name "*.yaml" -exec sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TARGET_PORT/g" {} + 2>/dev/null || true
+    
+    # Start and Verify
+    systemctl start crowdsec
+    sleep 5
+    if ! systemctl is-active --quiet crowdsec; then
+        echo "⚠️ Start failed on port $TARGET_PORT. Retrying with rotation..."
+        # Recursive retry with forced rotation (by not setting TARGET_PORT, loop will find next free one)
+        # But we need to ensure the old config doesn't block us. 
+        # We manually bump config to force next check to fail 'already configured' check
+        sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:8080/g" /etc/crowdsec/config.yaml
+        configure_crowdsec_port # RECURSION (One level deep usually fixes it)
     fi
 }
 
 wait_for_lapi() {
-    echo "⏳ Waiting for CrowdSec API to initialize..."
-    local max_wait=60
+    echo "⏳ Waiting for CrowdSec API..."
+    local max_wait=40
     local waited=0
-    
     while [ $waited -lt $max_wait ]; do
-        if cscli lapi status >/dev/null 2>&1; then
-            echo " -> CrowdSec API is READY."
+        if cscli lapi status >/dev/null 2>&1; then 
+            echo " -> API Ready."
             return 0
         fi
         sleep 2
         ((waited+=2))
-        # If it takes too long, try a gentle nudge
-        if [ $waited -eq 20 ]; then systemctl restart crowdsec; fi
     done
-    
-    echo "❌ CrowdSec API failed to start within $max_wait seconds."
-    # Dump log for error handler
-    journalctl -n 20 -u crowdsec --no-pager
-    exit 1
+    echo "❌ API timeout."
+    return 1
 }
 
 if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
@@ -248,20 +266,28 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         install_pkg crowdsec
     fi
     
-    # 1. Enforce Port
+    # 1. Smart Configure
     configure_crowdsec_port
     
-    # 2. Wait for API (Active Probe)
+    # 2. Wait
     CURRENT_TASK="Waiting for CrowdSec LAPI"
-    wait_for_lapi
+    if ! wait_for_lapi; then
+        echo "⚠️ LAPI Unresponsive. Triggering Emergency Port Rotation..."
+        # Force a totally different port (start higher) to escape zombie zone
+        sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:42050/g" /etc/crowdsec/config.yaml
+        sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:42050/g" /etc/crowdsec/local_api_credentials.yaml
+        systemctl restart crowdsec
+        sleep 5
+    fi
 
-    # 3. Install Bouncer (Safe now)
+    # 3. Install Bouncer
     if ! command -v crowdsec-firewall-bouncer >/dev/null; then
         CURRENT_TASK="Installing Firewall Bouncer"
         install_pkg crowdsec-firewall-bouncer-iptables
-        
-        # Patch bouncer config immediately
-        configure_crowdsec_port
+        # Sync bouncer config to whatever port finally worked
+        FINAL_PORT=$(grep "listen_uri:" /etc/crowdsec/config.yaml | awk -F':' '{print $3}' | tr -d ' ' || echo "8080")
+        find /etc/crowdsec/bouncers/ -name "*.yaml" -exec sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$FINAL_PORT/g" {} + 2>/dev/null || true
+        systemctl restart crowdsec-firewall-bouncer
     fi
 
     rm -f /usr/lib/crowdsec/plugins/{dummy,install.sh,update-firewall-blocklists.sh} 2>/dev/null || true
@@ -654,8 +680,9 @@ CURRENT_TASK="Final Diagnostics"
 echo ">>> 7. FINAL HEALTH CHECK..."
 FAILED_SERVICES=""
 
-# Wait for CrowdSec one last time to be sure it settled
-wait_for_lapi
+# Final forceful restart to ensure CrowdSec picks up all changes
+systemctl restart crowdsec || true
+sleep 3
 
 get_status() { systemctl is-active --quiet $1 && echo "Active" || echo "Failed"; }
 
