@@ -2,17 +2,17 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v17.3 - VERBOSE CONSOLE / SILENT TELEGRAM) ---
-# - BEHAVIOR: Terminal shows EVERYTHING. Telegram shows ONLY ERRORS.
-# - FIX: Updater script includes Hostname/IP in error messages.
-# - LOGIC: Nuclear Reset + Port Rotation + Config Synthesis.
+# --- Firewall & Sensor Installer (v17.4 - IDEMPOTENT) ---
+# - LOGIC: Checks if CrowdSec is healthy BEFORE attempting install/config
+# - FIX: Prevents unneeded "Nuclear Resets" on healthy systems
+# - FIX: Silent Success on Telegram
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.3"
+INSTALLER_VERSION="v17.4"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION ---
@@ -24,7 +24,7 @@ BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-}"
 TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
-# --- HELPER FUNCTIONS (INSTALLER) ---
+# --- HELPER FUNCTIONS ---
 get_server_identity() {
     SERVER_IP="Unknown"; SERVER_CC="??"
     if command -v curl >/dev/null; then
@@ -46,8 +46,6 @@ handle_error() {
     local LOG_TAIL=""; if command -v journalctl >/dev/null; then LOG_TAIL=$(journalctl -u crowdsec -n 10 --no-pager 2>/dev/null | tail -n 10); fi
     get_server_identity
     local OS_NAME="Unknown"; if [ -f /etc/os-release ]; then OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"'); fi
-    
-    # TELEGRAM: ONLY ON ERROR
     send_msg "🚨 <b>INSTALL CRASHED</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A<b>Task:</b> $CURRENT_TASK%0A<b>Line:</b> $line%0A%0A<b>Log Context:</b>%0A<pre>$LOG_TAIL</pre>"
 }
 trap 'handle_error $LINENO' ERR
@@ -123,7 +121,7 @@ cat <<TIME > /etc/systemd/system/daily-system-cleanup.timer
 Description=Run Daily Cleanup
 [Timer]
 OnCalendar=daily
-RandomizedDelaySec=3600
+RandomizedDelaySec=300
 Persistent=true
 [Install]
 WantedBy=timers.target
@@ -177,8 +175,22 @@ purge_crowdsec() {
 }
 
 configure_and_start_crowdsec() {
+    # 0. SMART CHECK: IS IT ALREADY RUNNING HEALTHY?
+    if systemctl is-active --quiet crowdsec; then
+        local CUR_PORT=$(grep "listen_uri:" /etc/crowdsec/config.yaml | awk -F':' '{print $3}' | tr -d ' ' || echo "8080")
+        if [[ "$CUR_PORT" -ge 42000 && "$CUR_PORT" -le 42100 ]]; then
+            if cscli lapi status >/dev/null 2>&1; then
+                echo "✅ CrowdSec is already running healthy on port $CUR_PORT. Skipping setup."
+                return 0
+            fi
+        fi
+    fi
+
+    # 1. Prepare
     harden_crowdsec_service
     synthesize_configs
+    
+    # 2. Cleanup
     systemctl stop crowdsec || true
     pkill -9 crowdsec || true
     sleep 2
@@ -336,7 +348,7 @@ perform_auto_update() { return 0; }
 check_connectivity() { if ! curl -s --head --request GET https://1.1.1.1 > /dev/null; then echo "No internet."; exit 0; fi; }
 repair_environment() { local HN=$(hostname); if ! grep -q "127.0.1.1 $HN" /etc/hosts; then echo "127.0.1.1 $HN" >> /etc/hosts; fi; }
 
-# UPDATER IDENTITY LOGIC (For Error Messages Only)
+# UPDATER IDENTITY
 get_identity() {
     HN=$(hostname)
     IP=$(curl -s --max-time 2 http://ip-api.com/csv/?fields=query | cut -d',' -f1 || echo "Unknown-IP")
@@ -420,7 +432,6 @@ main() {
   update_dyndns
   local cnt_new_v4=$(get_set_count "$IPSET_BL"); local diff_v4=$((cnt_new_v4 - cnt_old_v4))
   log "Finished [IPv4: $cnt_new_v4 ($diff_v4)]"
-  # SILENT SUCCESS: NO TELEGRAM HERE
 }
 main "${1:-}"
 EOF_UPDATER
