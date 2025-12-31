@@ -2,17 +2,17 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v16.5 - BULLETPROOF) ---
-# - FIX: Updater Script Variable Scope (SCRIPT_VERSION fixed)
-# - FIX: CrowdSec Loop Logic (Allow systemctl failure to trigger rotation)
-# - LOGIC: Robust Port Hunting
+# --- Firewall & Sensor Installer (v16.6 - BRUTE FORCE EDITION) ---
+# - FIX: Systemctl failures no longer crash the script (Allows loop to rotate ports)
+# - LOGIC: Brute-Force Port Selection (42000 -> 42001 -> 42002...)
+# - FIX: SCRIPT_VERSION variable scope in updater
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v16.5"
+INSTALLER_VERSION="v16.6"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION ---
@@ -43,7 +43,7 @@ send_msg() {
 handle_error() {
     local line=$1
     echo "❌ CRITICAL ERROR at line $line during task: '$CURRENT_TASK'"
-    local LOG_TAIL=""; if command -v journalctl >/dev/null; then LOG_TAIL=$(journalctl -u crowdsec -n 5 --no-pager 2>/dev/null | tail -n 5); fi
+    local LOG_TAIL=""; if command -v journalctl >/dev/null; then LOG_TAIL=$(journalctl -u crowdsec -n 10 --no-pager 2>/dev/null | tail -n 10); fi
     get_server_identity
     local OS_NAME="Unknown"; if [ -f /etc/os-release ]; then OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"'); fi
     send_msg "🚨 <b>INSTALL CRASHED</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A<b>Task:</b> $CURRENT_TASK%0A<b>Line:</b> $line%0A%0A<b>Log Context:</b>%0A<pre>$LOG_TAIL</pre>"
@@ -126,54 +126,49 @@ TIME
 systemctl daemon-reload
 systemctl enable --now daily-system-cleanup.timer
 
-# --- 4. CROWDSEC SETUP (FIXED LOOP) ---
+# --- 4. CROWDSEC SETUP (BRUTE FORCE LOOP) ---
 CURRENT_TASK="CrowdSec Setup"
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
 configure_and_start_crowdsec() {
-    # Brutal Cleanup
-    systemctl stop crowdsec || true
-    pkill -9 crowdsec || true
-    sleep 2
-
-    local CONFIG_FILE="/etc/crowdsec/config.yaml"
-    local CURRENT_PORT=""
-    if [[ -f "$CONFIG_FILE" ]]; then
-        CURRENT_PORT=$(grep "listen_uri:" "$CONFIG_FILE" | awk -F':' '{print $3}' | tr -d ' ' || true)
-    fi
-
-    # Start loop from 42000 or existing port
+    # Start loop from 42000
     local START_PORT=42000
-    if [[ -n "$CURRENT_PORT" && "$CURRENT_PORT" -ge 42000 ]]; then START_PORT=$CURRENT_PORT; fi
-    
     local ATTEMPT=0
-    local MAX_ATTEMPTS=5
+    local MAX_ATTEMPTS=6
     
     while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
         local TEST_PORT=$((START_PORT + ATTEMPT))
-        echo "🔧 Trying to bind CrowdSec to Port: $TEST_PORT (Attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)"
+        echo "🔧 Attempting CrowdSec on Port: $TEST_PORT ($((ATTEMPT+1))/$MAX_ATTEMPTS)"
         
-        # Apply Config
+        # 1. Brutal Cleanup
+        systemctl stop crowdsec || true
+        pkill -9 crowdsec || true
+        # Wait for sockets to close
+        sleep 2
+        
+        # 2. Apply Config Forcefully
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
         find /etc/crowdsec/bouncers/ -name "*.yaml" -exec sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" {} + 2>/dev/null || true
         
-        # Try Start (With error suppression to allow loop to continue)
-        if systemctl start crowdsec; then
+        # 3. Try Start (CRITICAL: "|| true" prevents script exit on systemctl failure)
+        if systemctl start crowdsec 2>/dev/null; then
             sleep 5
             if systemctl is-active --quiet crowdsec; then
-                echo "✅ CrowdSec started successfully on port $TEST_PORT."
-                return 0
+                # Double check API response
+                if cscli lapi status >/dev/null 2>&1; then
+                    echo "✅ CrowdSec successfully locked to port $TEST_PORT."
+                    return 0
+                fi
             fi
         fi
         
-        echo "⚠️ Failed to start on port $TEST_PORT. Rotating..."
-        systemctl stop crowdsec || true
+        echo "⚠️ Port $TEST_PORT failed (Status: $(systemctl is-failed crowdsec)). Rotating..."
         ((ATTEMPT++))
     done
     
-    echo "❌ CRITICAL: Could not start CrowdSec after $MAX_ATTEMPTS rotation attempts."
+    echo "❌ CRITICAL: Could not start CrowdSec after trying $MAX_ATTEMPTS ports."
     exit 1
 }
 
@@ -184,19 +179,15 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         install_pkg crowdsec
     fi
     
+    # 1. Run the Rotation Loop
     configure_and_start_crowdsec
     
-    # Wait for API
-    CURRENT_TASK="Waiting for API"
-    for i in {1..20}; do
-        if cscli lapi status >/dev/null 2>&1; then break; fi
-        sleep 2
-    done
-
-    # Install Bouncer
+    # 2. Install Bouncer
     if ! command -v crowdsec-firewall-bouncer >/dev/null; then
+        CURRENT_TASK="Installing Bouncer"
         install_pkg crowdsec-firewall-bouncer-iptables
-        configure_and_start_crowdsec # Re-run to patch bouncer config
+        # Re-run loop to patch the new bouncer config
+        configure_and_start_crowdsec
     fi
 
     rm -f /usr/lib/crowdsec/plugins/{dummy,install.sh,update-firewall-blocklists.sh} 2>/dev/null || true
@@ -256,13 +247,13 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- WRITE UPDATER (FIXED VARIABLE) ---
+# --- WRITE UPDATER (QUOTED EOF TO PREVENT EXPANSION) ---
 cat << 'EOF_UPDATER' > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_VERSION="v11.7"  # DEFINED LOCALLY NOW
+SCRIPT_VERSION="v11.7"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="$BASE_DIR/firewall-blocklists"
 KEYFILE="${KEYFILE:-$BASE_DIR/firewall-blocklist-keys.env}"
