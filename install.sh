@@ -2,17 +2,17 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v16.4 - PORT ROTATION LOOP) ---
-# - FIX: Replaced static check with active Startup-Retry-Loop
-# - LOGIC: If Port 42000 fails (TIME_WAIT), automatically tries 42001, 42002...
-# - FIX: Aggressive cleanup of old processes
+# --- Firewall & Sensor Installer (v16.5 - BULLETPROOF) ---
+# - FIX: Updater Script Variable Scope (SCRIPT_VERSION fixed)
+# - FIX: CrowdSec Loop Logic (Allow systemctl failure to trigger rotation)
+# - LOGIC: Robust Port Hunting
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v16.4"
+INSTALLER_VERSION="v16.5"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION ---
@@ -126,18 +126,17 @@ TIME
 systemctl daemon-reload
 systemctl enable --now daily-system-cleanup.timer
 
-# --- 4. CROWDSEC SETUP (LOOP FIX) ---
+# --- 4. CROWDSEC SETUP (FIXED LOOP) ---
 CURRENT_TASK="CrowdSec Setup"
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
 configure_and_start_crowdsec() {
-    # Brutal Cleanup first
+    # Brutal Cleanup
     systemctl stop crowdsec || true
     pkill -9 crowdsec || true
     sleep 2
 
-    # Check current config
     local CONFIG_FILE="/etc/crowdsec/config.yaml"
     local CURRENT_PORT=""
     if [[ -f "$CONFIG_FILE" ]]; then
@@ -156,22 +155,22 @@ configure_and_start_crowdsec() {
         echo "🔧 Trying to bind CrowdSec to Port: $TEST_PORT (Attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)"
         
         # Apply Config
-        sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/config.yaml
-        sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/local_api_credentials.yaml
+        sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
+        sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
         find /etc/crowdsec/bouncers/ -name "*.yaml" -exec sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" {} + 2>/dev/null || true
         
-        # Try Start
-        systemctl start crowdsec
-        sleep 5
-        
-        if systemctl is-active --quiet crowdsec; then
-            echo "✅ CrowdSec started successfully on port $TEST_PORT."
-            return 0
-        else
-            echo "⚠️ Failed to start on port $TEST_PORT (Status: $(systemctl is-failed crowdsec)). Rotating..."
-            systemctl stop crowdsec
-            ((ATTEMPT++))
+        # Try Start (With error suppression to allow loop to continue)
+        if systemctl start crowdsec; then
+            sleep 5
+            if systemctl is-active --quiet crowdsec; then
+                echo "✅ CrowdSec started successfully on port $TEST_PORT."
+                return 0
+            fi
         fi
+        
+        echo "⚠️ Failed to start on port $TEST_PORT. Rotating..."
+        systemctl stop crowdsec || true
+        ((ATTEMPT++))
     done
     
     echo "❌ CRITICAL: Could not start CrowdSec after $MAX_ATTEMPTS rotation attempts."
@@ -185,21 +184,19 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         install_pkg crowdsec
     fi
     
-    # 1. Run the Rotation Loop
     configure_and_start_crowdsec
     
-    # 2. Wait for API Ready
+    # Wait for API
     CURRENT_TASK="Waiting for API"
     for i in {1..20}; do
         if cscli lapi status >/dev/null 2>&1; then break; fi
         sleep 2
     done
 
-    # 3. Install Bouncer
+    # Install Bouncer
     if ! command -v crowdsec-firewall-bouncer >/dev/null; then
         install_pkg crowdsec-firewall-bouncer-iptables
-        # Re-run config to patch the new bouncer file with correct port
-        configure_and_start_crowdsec
+        configure_and_start_crowdsec # Re-run to patch bouncer config
     fi
 
     rm -f /usr/lib/crowdsec/plugins/{dummy,install.sh,update-firewall-blocklists.sh} 2>/dev/null || true
@@ -259,12 +256,13 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- WRITE UPDATER ---
+# --- WRITE UPDATER (FIXED VARIABLE) ---
 cat << 'EOF_UPDATER' > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+SCRIPT_VERSION="v11.7"  # DEFINED LOCALLY NOW
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="$BASE_DIR/firewall-blocklists"
 KEYFILE="${KEYFILE:-$BASE_DIR/firewall-blocklist-keys.env}"
@@ -295,12 +293,6 @@ perform_auto_update() { return 0; }
 check_connectivity() { if ! curl -s --head --request GET https://1.1.1.1 > /dev/null; then echo "No internet."; exit 0; fi; }
 send_telegram() { if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" -d chat_id="$TELEGRAM_CHAT_ID" -d text="$1" -d parse_mode="HTML" >/dev/null || true; fi; }
 repair_environment() { local HN=$(hostname); if ! grep -q "127.0.1.1 $HN" /etc/hosts; then echo "127.0.1.1 $HN" >> /etc/hosts; fi; }
-
-# --- API RESCUE (SIMPLIFIED) ---
-fix_crowdsec_api() {
-    # If the updater detects API failure, try restart first
-    systemctl restart crowdsec
-}
 
 TMPDIR="/tmp/firewall-blocklists"
 IPSET_WL="allowed_whitelist"; IPSET_BL="blocklist_all"
@@ -445,7 +437,6 @@ TELEGRAM_CHAT_ID="$TG_CHAT"
 ENV
 chmod 600 "$CONF_DIR/firewall-blocklist-keys.env"
 
-# --- SERVICES ---
 cat <<SERV > /etc/systemd/system/firewall-blocklist-updater.service
 [Unit]
 Description=Firewall Blocklist Updater
