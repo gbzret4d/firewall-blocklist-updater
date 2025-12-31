@@ -2,17 +2,16 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v14.1 - MERGED) ---
-# - PAYLOAD: Includes your specific v11.6 Updater with 43 Lists
+# --- Firewall & Sensor Installer (v14.2 - UBUNTU 24.04 FIX) ---
+# - FIX: Replaced deprecated 'iproute' with 'iproute2' for Debian/Ubuntu
+# - PAYLOAD: Includes v11.7 Updater with 43 Lists
 # - COMPAT: Debian/Ubuntu/RHEL/CentOS/Rocky/Alma/Fedora
 # - FEAT: Auto-Cleanup, Deep Diagnostics, CrowdSec Boost
-# - SAFETY: Docker Check, Non-Interactive
 
 export DEBIAN_FRONTEND=noninteractive
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION MAPPING ---
-# Diese Variablen werden in das Updater-Skript übernommen
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-}"
 CS_ENROLL="${CROWDSEC_ENROLL_KEY:-}"
 DYNDNS="${DYNDNS_HOST:-}"
@@ -37,7 +36,7 @@ handle_error() {
 trap 'handle_error $LINENO' ERR
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v14.1)     "
+echo "   FIREWALL & CROWDSEC INSTALLER (v14.2)     "
 echo "============================================="
 
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
@@ -93,12 +92,23 @@ CURRENT_TASK="Installing Base Dependencies"
 echo ">>> 1. INSTALLING DEPENDENCIES via $PM..."
 
 update_repo
-install_pkg curl ipset iptables unzip file gnupg iproute logrotate endlessh
+
+# FIX: Removed 'iproute' from global list (it causes errors on Ubuntu 24.04)
+# Universal packages:
+install_pkg curl ipset iptables unzip file gnupg logrotate endlessh
 
 if [[ "$PM" == "apt-get" ]]; then
+    # DEBIAN/UBUNTU SPECIFIC:
+    # Use 'iproute2' instead of 'iproute'
+    # Use 'psmisc' for fuser command
     install_pkg dnsutils apt-transport-https iproute2 psmisc
+    
+    # Time Sync
     systemctl enable --now systemd-timesyncd 2>/dev/null || install_pkg chrony
 else
+    # RHEL/CENTOS SPECIFIC:
+    # Use 'iproute' (legacy name still valid here)
+    # Use 'bind-utils' for dig/nslookup
     install_pkg bind-utils iproute chrony
     systemctl enable --now chronyd 2>/dev/null || true
 fi
@@ -239,21 +249,21 @@ YAML
     fi
 fi
 
-# --- 5. UPDATER INSTALLATION (YOUR V11.6 CODE) ---
+# --- 5. UPDATER INSTALLATION ---
 CURRENT_TASK="Installing Updater Script"
 echo ">>> 4. INSTALLING UPDATER..."
 INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- WRITE THE UPDATER SCRIPT (v11.6 with 43 lists) ---
+# --- WRITE THE UPDATER SCRIPT (v11.7) ---
 cat << 'EOF_UPDATER' > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-SCRIPT_VERSION="v11.6"
+SCRIPT_VERSION="v11.7"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="$BASE_DIR/firewall-blocklists"
 KEYFILE="${KEYFILE:-$BASE_DIR/firewall-blocklist-keys.env}"
@@ -348,7 +358,6 @@ load_env_vars
 perform_auto_update() {
   if [[ "${1:-}" == "--post-update" ]]; then log "[AUTO-UPDATE] Update to $SCRIPT_VERSION successful."; return 0; fi
   if [[ $DRY_RUN -eq 1 ]]; then return 0; fi
-  # DISABLED SELF-UPDATE TO PREVENT OVERWRITING CUSTOM LISTS
   return 0
 }
 
