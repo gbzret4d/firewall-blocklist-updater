@@ -2,13 +2,14 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v14.2 - UBUNTU 24.04 FIX) ---
-# - FIX: Replaced deprecated 'iproute' with 'iproute2' for Debian/Ubuntu
+# --- Firewall & Sensor Installer (v14.4 - SILENT & ROBUST) ---
+# - FIX: Force custom systemd unit for Endlessh (Fixes startup fail)
+# - FIX: Suppress "needrestart" kernel warnings (Silent Mode)
 # - PAYLOAD: Includes v11.7 Updater with 43 Lists
 # - COMPAT: Debian/Ubuntu/RHEL/CentOS/Rocky/Alma/Fedora
-# - FEAT: Auto-Cleanup, Deep Diagnostics, CrowdSec Boost
 
 export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a  # Suppresses Ubuntu interactive restart prompts
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION MAPPING ---
@@ -36,7 +37,7 @@ handle_error() {
 trap 'handle_error $LINENO' ERR
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v14.2)     "
+echo "   FIREWALL & CROWDSEC INSTALLER (v14.4)     "
 echo "============================================="
 
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
@@ -93,22 +94,15 @@ echo ">>> 1. INSTALLING DEPENDENCIES via $PM..."
 
 update_repo
 
-# FIX: Removed 'iproute' from global list (it causes errors on Ubuntu 24.04)
 # Universal packages:
 install_pkg curl ipset iptables unzip file gnupg logrotate endlessh
 
 if [[ "$PM" == "apt-get" ]]; then
-    # DEBIAN/UBUNTU SPECIFIC:
-    # Use 'iproute2' instead of 'iproute'
-    # Use 'psmisc' for fuser command
-    install_pkg dnsutils apt-transport-https iproute2 psmisc
-    
-    # Time Sync
+    install_pkg dnsutils apt-transport-https psmisc
+    # Ubuntu 24.04 fix: use iproute2, fallback to iproute for old Debian
+    if ! apt-get install -y iproute2; then apt-get install -y iproute; fi
     systemctl enable --now systemd-timesyncd 2>/dev/null || install_pkg chrony
 else
-    # RHEL/CENTOS SPECIFIC:
-    # Use 'iproute' (legacy name still valid here)
-    # Use 'bind-utils' for dig/nslookup
     install_pkg bind-utils iproute chrony
     systemctl enable --now chronyd 2>/dev/null || true
 fi
@@ -407,61 +401,11 @@ fix_crowdsec_api() {
 }
 
 install_sensors() {
+    # NOTE: Endlessh config is now handled by the main installer's systemd unit creation
+    # to ensure robustness. This function remains for API rescue and CrowdSec sensor registration.
     repair_environment
-    echo ">>> Installing Sensors..."
     
-    local EL_PORT=0
-    for (( p=2222; p<=2232; p++ )); do
-        if ! ss -tuln | grep -q ":$p "; then EL_PORT=$p; break; else
-            local PID=$(ss -lptn "sport = :$p" | grep -o 'pid=[0-9]*' | cut -d= -f2 | head -n1 || true)
-            local PNAME=""; if [[ -n "$PID" ]]; then PNAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "unknown"); fi
-            if [[ "$PNAME" == "endlessh" ]]; then kill "$PID" 2>/dev/null || true; sleep 1; EL_PORT=$p; break; fi
-        fi
-    done
-
-    if [[ $EL_PORT -eq 0 ]]; then warn "❌ ERROR: No free ports found 2222-2232!"; return 1; fi
-
-    if ! command -v endlessh >/dev/null; then
-        if command -v apt-get >/dev/null; then apt-get update -qq && apt-get install -y endlessh
-        elif command -v yum >/dev/null; then yum install -y endlessh; fi
-    fi
-
-    mkdir -p /etc/endlessh
-    if [[ -d /etc/endlessh ]]; then
-        echo "Port $EL_PORT" > /etc/endlessh/config
-        echo "Delay 10000" >> /etc/endlessh/config
-        echo "LogLevel 1" >> /etc/endlessh/config
-        echo "BindFamily 4" >> /etc/endlessh/config
-        
-        cat <<SERV > /lib/systemd/system/endlessh.service
-[Unit]
-Description=Endlessh SSH Tarpit (Custom)
-Documentation=man:endlessh(1)
-Requires=network-online.target
-After=network-online.target
-
-[Service]
-Type=simple
-Restart=always
-RestartSec=30s
-ExecStart=/usr/bin/endlessh -v -f /etc/endlessh/config
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=full
-ProtectHome=yes
-
-[Install]
-WantedBy=multi-user.target
-SERV
-        systemctl daemon-reload
-        if ! systemctl enable --now endlessh; then warn "Endlessh failed start on $EL_PORT"; else systemctl restart endlessh; log "✅ Endlessh running on port $EL_PORT"; fi
-    fi
-
     if command -v cscli >/dev/null; then
-        cscli collections install crowdsecurity/endlessh --force >/dev/null 2>&1 || true
-        cscli collections install crowdsecurity/iptables --force >/dev/null 2>&1 || true
-        
         if ! grep -q "type: endlessh" /etc/crowdsec/acquis.yaml 2>/dev/null; then
             echo " -> Adding Sensor config to CrowdSec..."
             cp /etc/crowdsec/acquis.yaml /etc/crowdsec/acquis.yaml.bak 2>/dev/null || true
@@ -477,34 +421,11 @@ YAML
             rm -f /usr/lib/crowdsec/plugins/* 2>/dev/null || true
             if crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1; then
                 systemctl restart crowdsec
-                echo "✅ Sensors Configured."
             else
                 echo "❌ Config invalid. Starting EMERGENCY REPAIR (API Rescue)..."
                 fix_crowdsec_api
-                rm -f /usr/lib/crowdsec/plugins/* 2>/dev/null || true
-                cat <<YAML_CLEAN > /etc/crowdsec/acquis.yaml
-filenames:
-  - /var/log/auth.log
-  - /var/log/syslog
-labels:
-  type: syslog
----
-YAML_CLEAN
-                echo "" >> /etc/crowdsec/acquis.yaml
-                cat <<YAML_APPEND >> /etc/crowdsec/acquis.yaml
-filenames:
-  - /var/log/syslog
-  - /var/log/messages
-labels:
-  type: endlessh
-YAML_APPEND
                 systemctl restart crowdsec
                 systemctl restart crowdsec-firewall-bouncer || true
-                if systemctl is-active --quiet crowdsec; then
-                    log "✅ CrowdSec successfully repaired and restarted."
-                else
-                    warn "❌ CrowdSec repair failed. Please check logs manually."
-                fi
             fi
         fi
     fi
@@ -749,7 +670,32 @@ systemctl enable --now firewall-blocklist-updater.timer
 # --- 6. ENDLESSH CONFIGURATION ---
 CURRENT_TASK="Configuring Endlessh"
 echo ">>> 5. CONFIGURING ENDLESSH..."
-# Ensure Endlessh is configured properly
+
+# Force overwrite of any existing systemd service to ensure it matches our robust config
+cat <<SERV > /lib/systemd/system/endlessh.service
+[Unit]
+Description=Endlessh SSH Tarpit (Custom)
+Documentation=man:endlessh(1)
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=30s
+# Explicitly point to the config file we created
+ExecStart=/usr/bin/endlessh -v -f /etc/endlessh/config
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
+SERV
+systemctl daemon-reload
+
 if command -v endlessh >/dev/null; then
     mkdir -p /etc/endlessh
     echo "Port 2222" > /etc/endlessh/config
