@@ -2,17 +2,17 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v16.9 - SYSTEMD HARDENING) ---
-# - FIX: Replaces weak CrowdSec systemd unit with a hardened version
-# - FIX: Forces 'Restart=always' and prevents start-limit failures
-# - LOGIC: Robust Port Handling
+# --- Firewall & Sensor Installer (v17.0 - CONFIG SYNTHESIZER) ---
+# - FIX: Generates valid minimal configuration files before first start
+# - FIX: Prevents "acquis.yaml missing/empty" crash loop
+# - LOGIC: Robust Port Handling + Nuclear Reset
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v16.9"
+INSTALLER_VERSION="v17.0"
 CURRENT_TASK="Initializing"
 
 # --- CONFIGURATION ---
@@ -134,7 +134,7 @@ CURRENT_TASK="CrowdSec Setup"
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
-# NEW: Harden the Systemd Service File
+# Harden Service
 harden_crowdsec_service() {
     echo "🛡️ Hardening CrowdSec Systemd Service..."
     cat <<SERVICE > /lib/systemd/system/crowdsec.service
@@ -148,17 +148,34 @@ Environment=LC_ALL=C LANG=C
 PIDFile=/var/run/crowdsec.pid
 ExecStartPre=/usr/bin/crowdsec -c /etc/crowdsec/config.yaml -t -error
 ExecStart=/usr/bin/crowdsec -c /etc/crowdsec/config.yaml
-# HARDENING: Auto-restart on failure with delays
 Restart=always
 RestartSec=5s
 StartLimitInterval=0
-# HARDENING: Kill zombies before start
 ExecStartPre=-/usr/bin/pkill -9 -f "crowdsec -c"
 
 [Install]
 WantedBy=multi-user.target
 SERVICE
     systemctl daemon-reload
+}
+
+# GENERATE VALID CONFIGS IF MISSING
+synthesize_configs() {
+    echo "🛠️ Synthesizing base configuration..."
+    mkdir -p /etc/crowdsec
+    
+    # Ensure acquis.yaml exists and is valid
+    if [[ ! -s /etc/crowdsec/acquis.yaml ]]; then
+        cat <<ACQUIS > /etc/crowdsec/acquis.yaml
+filenames:
+  - /var/log/syslog
+  - /var/log/auth.log
+  - /var/log/messages
+labels:
+  type: syslog
+---
+ACQUIS
+    fi
 }
 
 purge_crowdsec() {
@@ -170,8 +187,9 @@ purge_crowdsec() {
 }
 
 configure_and_start_crowdsec() {
-    # 1. Harden Service First
+    # 1. Harden & Prepare
     harden_crowdsec_service
+    synthesize_configs
     
     # 2. Brutal Cleanup
     systemctl stop crowdsec || true
@@ -187,7 +205,7 @@ configure_and_start_crowdsec() {
         local TEST_PORT=$((START_PORT + ATTEMPT))
         echo "🔧 Config Attempt on Port: $TEST_PORT ($((ATTEMPT+1))/$MAX_ATTEMPTS)"
         
-        if [[ ! -f "$CONFIG_FILE" ]]; then install_pkg crowdsec; harden_crowdsec_service; fi
+        if [[ ! -f "$CONFIG_FILE" ]]; then install_pkg crowdsec; harden_crowdsec_service; synthesize_configs; fi
 
         # Force Port Update
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
@@ -482,7 +500,6 @@ ExecStart=$INSTALL_DIR/update-firewall-blocklists.sh
 [Install]
 WantedBy=multi-user.target
 SERV
-
 cat <<TIME > /etc/systemd/system/firewall-blocklist-updater.timer
 [Unit]
 Description=Run Firewall Blocklist Updater Hourly
@@ -493,7 +510,6 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 TIME
-
 systemctl daemon-reload
 systemctl enable --now firewall-blocklist-updater.service
 systemctl enable --now firewall-blocklist-updater.timer
