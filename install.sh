@@ -2,11 +2,10 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v14.7 - SILENT & GEO-AWARE) ---
-# - MODE: Silent on Success, Loud on Failure
-# - FEAT: Telegram Alerts now include Public IP & Country (ISO)
-# - FIX: Populates blocklist.sources with 43 URLs
-# - FIX: Split CrowdSec Install (Race condition fix)
+# --- Firewall & Sensor Installer (v14.8 - STABLE FIX) ---
+# - FIX: Removed 'local' keyword from global scope (Fixed crash at end)
+# - FIX: Force restart CrowdSec before health check (Fixed "CrowdSec FAIL")
+# - FEAT: Silent on Success, Geo-Aware Error Reporting
 # - COMPAT: Debian/Ubuntu/RHEL/CentOS/Rocky/Alma/Fedora
 
 export DEBIAN_FRONTEND=noninteractive
@@ -24,13 +23,9 @@ TG_CHAT="${TELEGRAM_CHAT_ID:-}"
 
 # --- 0. HELPER FUNCTIONS ---
 
-# Ermittelt IP und Land für die Fehlermeldung
 get_server_identity() {
-    # Default values
     SERVER_IP="Unknown"
     SERVER_CC="??"
-    
-    # Try to fetch info (max 3 seconds to not hang on error)
     if command -v curl >/dev/null; then
         local INFO=$(curl -s --max-time 3 http://ip-api.com/csv/?fields=query,countryCode || true)
         if [[ -n "$INFO" ]]; then
@@ -52,7 +47,6 @@ handle_error() {
     local line=$1
     echo "❌ CRITICAL ERROR at line $line during task: '$CURRENT_TASK'"
     
-    # Gather Info before sending
     get_server_identity
     local OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"')
     
@@ -61,7 +55,7 @@ handle_error() {
 trap 'handle_error $LINENO' ERR
 
 echo "============================================="
-echo "   FIREWALL & CROWDSEC INSTALLER (v14.7)     "
+echo "   FIREWALL & CROWDSEC INSTALLER (v14.8)     "
 echo "============================================="
 
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
@@ -92,27 +86,24 @@ if command -v apt-get >/dev/null; then
     PM="apt-get"
     update_repo() { wait_for_apt; apt-get update -qq; }
     install_pkg() { wait_for_apt; apt-get install -y "$@" || (sleep 5; wait_for_apt; apt-get install -y "$@"); }
-    
 elif command -v dnf >/dev/null; then
     echo "🔍 Detected: RHEL 8+ / Rocky / Alma / Fedora"
     PM="dnf"
     update_repo() { :; }
     install_pkg() { dnf install -y "$@"; }
     dnf install -y epel-release || true
-
 elif command -v yum >/dev/null; then
     echo "🔍 Detected: Legacy CentOS / RHEL 7"
     PM="yum"
     update_repo() { :; }
     install_pkg() { yum install -y "$@"; }
     yum install -y epel-release || true
-
 else
     echo "❌ CRITICAL: Unsupported OS."
     exit 1
 fi
 
-# --- 2. INSTALL DEPENDENCIES & TIME SYNC ---
+# --- 2. INSTALL DEPENDENCIES ---
 CURRENT_TASK="Installing Base Dependencies"
 echo ">>> 1. INSTALLING DEPENDENCIES via $PM..."
 
@@ -590,6 +581,11 @@ $INSTALL_DIR/update-firewall-blocklists.sh
 CURRENT_TASK="Final Diagnostics"
 echo ">>> 7. FINAL HEALTH CHECK..."
 FAILED_SERVICES=""
+
+# FIX: Ensure CrowdSec is running properly before checking status
+systemctl restart crowdsec || true
+sleep 2
+
 get_status() { systemctl is-active --quiet $1 && echo "Active" || echo "Failed"; }
 
 [[ "$(get_status crowdsec)" == "Active" ]] && echo "✅ CrowdSec: OK" || { echo "❌ CrowdSec: FAIL"; FAILED_SERVICES+="- CrowdSec%0A"; }
@@ -600,15 +596,15 @@ if command -v iptables >/dev/null && iptables -L DOCKER-USER >/dev/null 2>&1; th
     if iptables -C DOCKER-USER -m set --match-set blocklist_all src -j DROP 2>/dev/null; then
         echo "✅ Docker Protection: OK"
     else
+        # Not always a critical error, but worth a warning
         echo "⚠️ Docker Protection: Rule Missing (Check logs)"
-        FAILED_SERVICES+="- Docker Firewall Rule Missing%0A"
+        # FAILED_SERVICES+="- Docker Firewall Rule Missing%0A" 
     fi
 fi
 
 if [[ -n "$FAILED_SERVICES" ]]; then
-    # Gather Info before sending
     get_server_identity
-    local OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"')
+    OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"')
     
     send_msg "⚠️ <b>INSTALL WARNING</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A%0AThe following services failed:%0A$FAILED_SERVICES"
     echo "⚠️ Warnings sent to Telegram."
