@@ -8,7 +8,6 @@ https://sslbl.abuse.ch/blacklist/sslipblacklist.txt
 https://danger.rulez.sk/projects/bruteforceblocker/blist.php
 
 # --- Aggregators ---
-https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt
 https://blocklist.greensnow.co/greensnow.txt
 https://iplists.firehol.org/files/greensnow.ipset
 https://lists.blocklist.de/lists/all.txt
@@ -21,6 +20,10 @@ https://iplists.firehol.org/files/et_compromised.ipset
 https://www.binarydefense.com/banlist.txt
 https://iplists.firehol.org/files/bds_atif.ipset
 https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/binarydefense.txt
+https://threatview.io/Downloads/IP-High-Confidence-Feed.txt
+https://dataplane.org/vncrfb.txt
+http://vxvault.net/URL_List.php
+https://view.sentinel.turris.cz/greylist-data/greylist-latest.csv
 
 # --- GitHub Lists ---
 https://github.com/borestad/blocklist-abuseipdb/raw/refs/heads/main/abuseipdb-s100-7d.ipv4
@@ -29,6 +32,10 @@ https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/Extreme
 https://raw.githubusercontent.com/ShadowWhisperer/IPs/refs/heads/master/Malware/Hackers
 https://github.com/romainmarcoux/malicious-ip/raw/refs/heads/main/full-40k.txt
 https://raw.githubusercontent.com/romainmarcoux/malicious-outgoing-ip/refs/heads/main/full-outgoing-ip-40k.txt
+https://raw.githubusercontent.com/stamparm/ipsum/master/levels/5.txt
+https://raw.githubusercontent.com/stamparm/ipsum/master/levels/6.txt
+https://raw.githubusercontent.com/stamparm/ipsum/master/levels/7.txt
+https://raw.githubusercontent.com/stamparm/ipsum/master/levels/8.txt
 
 # --- IOCs & C2 ---
 https://raw.githubusercontent.com/elliotwutingfeng/ThreatFox-IOC-IPs/refs/heads/main/ips.txt
@@ -40,6 +47,8 @@ https://feodotracker.abuse.ch/downloads/ipblocklist.csv
 https://tracker.viriback.com/last30.php
 https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
 https://sslbl.abuse.ch/blacklist/sslbl.rpz
+https://threatview.io/Downloads/High-Confidence-CobaltStrike-C2%20-Feeds.txt
+https://urlhaus.abuse.ch/downloads/csv_recent/
 
 # --- FireHOL Collections ---
 https://cinsscore.com/list/ci-badguys.txt

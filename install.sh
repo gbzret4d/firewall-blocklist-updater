@@ -2,17 +2,17 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.9 - NO VERSION.TXT NEEDED) ---
-# - FEAT: Auto-Update checks install.sh directly (parses version header)
-# - LOGIC: Zero-Touch maintenance. Just update install.sh in repo.
-# - FIX: Robust enrollment & silent operations.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.11 - REFINED LISTS) ---
+# - UPDATE: Switched aggressive Ipsum L3 to high-confidence L5
+# - OPTIMIZATION: Removed redundant subset lists (L6-L8 are inside L5)
+# - LOGIC: Full Autonomy (Self-Updating, Idempotent, Silent Success)
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.9"
+INSTALLER_VERSION="v17.11"
 
 # --- 1. KEY LOADING LOGIC ---
 EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
@@ -312,7 +312,7 @@ cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_VERSION="v11.9"
+SCRIPT_VERSION="v11.11"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
@@ -341,22 +341,9 @@ load_env_vars() { if [[ -f "\$KEYFILE" ]]; then set +u; set -a; source "\$KEYFIL
 
 # --- INTELLIGENT AUTO-UPDATE (NO VERSION.TXT) ---
 perform_auto_update() {
-    # Download the remote installer to a temp file
     local TMP_INSTALLER="/tmp/install_latest.sh"
     if curl -sL --max-time 10 "\$REPO_URL/install.sh" -o "\$TMP_INSTALLER"; then
-        # Grep the version string from the file itself (looks for INSTALLER_VERSION="v...")
-        local REMOTE_VER=\$(grep -oE 'INSTALLER_VERSION="v[0-9]+\.[0-9]+"' "\$TMP_INSTALLER" | head -n1 | cut -d'"' -f2 || echo "")
-        
-        # Current local version (of the installer that installed this updater) is not stored,
-        # so we compare against the Updater Version or just install if it looks valid?
-        # Better strategy: We don't know the local INSTALLER version, but we know THIS script version.
-        # Let's assume if the remote installer has a higher version number than OUR known baseline, we run it.
-        # OR simpler: The installer updates THIS script to a new version (SCRIPT_VERSION).
-        # We check the remote install.sh, grep ITS internal 'SCRIPT_VERSION="v..."' for the updater.
-        
-        # LOGIC: Check if remote install.sh contains a newer SCRIPT_VERSION for the updater
         local NEW_UPDATER_VER=\$(grep -oE 'SCRIPT_VERSION="v[0-9]+\.[0-9]+"' "\$TMP_INSTALLER" | head -n1 | cut -d'"' -f2 || echo "")
-        
         if [[ -n "\$NEW_UPDATER_VER" && "\$NEW_UPDATER_VER" != "\$SCRIPT_VERSION" ]]; then
             log "Update found: Installer carries \$NEW_UPDATER_VER (Local: \$SCRIPT_VERSION). Upgrading..."
             bash "\$TMP_INSTALLER"
@@ -458,6 +445,72 @@ main() {
 main "\${1:-}"
 EOF_UPDATER
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
+
+# --- POPULATE SOURCES (OPTIMIZED & SORTED) ---
+cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
+# --- High Confidence ---
+https://www.spamhaus.org/drop/drop.txt
+https://www.spamhaus.org/drop/edrop.txt
+https://www.spamhaus.org/drop/dropv6.txt
+https://feeds.dshield.org/block.txt
+https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+https://sslbl.abuse.ch/blacklist/sslipblacklist.txt
+https://danger.rulez.sk/projects/bruteforceblocker/blist.php
+
+# --- Aggregators ---
+https://raw.githubusercontent.com/stamparm/ipsum/master/levels/5.txt
+# https://raw.githubusercontent.com/stamparm/ipsum/master/levels/6.txt
+# https://raw.githubusercontent.com/stamparm/ipsum/master/levels/7.txt
+# https://raw.githubusercontent.com/stamparm/ipsum/master/levels/8.txt
+https://blocklist.greensnow.co/greensnow.txt
+https://iplists.firehol.org/files/greensnow.ipset
+https://lists.blocklist.de/lists/all.txt
+https://www.blocklist.de/downloads/export-ips_all.txt
+
+# --- Threat Intel & Mirrors ---
+https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt
+https://rules.emergingthreats.net/blockrules/compromised-ips.txt
+https://iplists.firehol.org/files/et_compromised.ipset
+https://www.binarydefense.com/banlist.txt
+https://iplists.firehol.org/files/bds_atif.ipset
+https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/binarydefense.txt
+https://threatview.io/Downloads/IP-High-Confidence-Feed.txt
+https://dataplane.org/vncrfb.txt
+http://vxvault.net/URL_List.php
+https://view.sentinel.turris.cz/greylist-data/greylist-latest.csv
+
+# --- GitHub Lists ---
+https://github.com/borestad/blocklist-abuseipdb/raw/refs/heads/main/abuseipdb-s100-7d.ipv4
+https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/High
+https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/Extreme
+https://raw.githubusercontent.com/ShadowWhisperer/IPs/refs/heads/master/Malware/Hackers
+https://github.com/romainmarcoux/malicious-ip/raw/refs/heads/main/full-40k.txt
+https://raw.githubusercontent.com/romainmarcoux/malicious-outgoing-ip/refs/heads/main/full-outgoing-ip-40k.txt
+
+# --- IOCs & C2 ---
+https://raw.githubusercontent.com/elliotwutingfeng/ThreatFox-IOC-IPs/refs/heads/main/ips.txt
+https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/cobaltstrike_ips.txt
+https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/alienvault.txt
+https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/compromised-ips.txt
+https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/illuminate.txt
+https://feodotracker.abuse.ch/downloads/ipblocklist.csv
+https://tracker.viriback.com/last30.php
+https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
+https://sslbl.abuse.ch/blacklist/sslbl.rpz
+https://threatview.io/Downloads/High-Confidence-CobaltStrike-C2%20-Feeds.txt
+https://urlhaus.abuse.ch/downloads/csv_recent/
+
+# --- FireHOL Collections ---
+https://cinsscore.com/list/ci-badguys.txt
+http://www.botvrij.eu/data/ioclist.ip-dst.raw
+https://iplists.firehol.org/files/cybercrime.ipset
+https://iplists.firehol.org/files/myip.ipset
+https://iplists.firehol.org/files/firehol_level1.netset
+https://iplists.firehol.org/files/sblam.ipset
+https://iplists.firehol.org/files/firehol_webclient.netset
+https://iplists.firehol.org/files/firehol_level2.netset
+https://iplists.firehol.org/files/botscout_7d.ipset
+SOURCES
 
 cat <<ENV > "$CONF_DIR/firewall-blocklist-keys.env"
 ABUSEIPDB_API_KEY="$ABUSE_KEY"
