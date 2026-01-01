@@ -2,32 +2,24 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.8 - FULL AUTONOMY) ---
-# - LOGIC: Loads existing keys from disk if run without arguments (for Auto-Update)
-# - BEHAVIOR: Silent on Success, Loud on Error
-# - FEAT: Idempotent Enrollment (File Check)
+# --- FIREWALL & CROWDSEC INSTALLER (v17.9 - NO VERSION.TXT NEEDED) ---
+# - FEAT: Auto-Update checks install.sh directly (parses version header)
+# - LOGIC: Zero-Touch maintenance. Just update install.sh in repo.
+# - FIX: Robust enrollment & silent operations.
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.8"
+INSTALLER_VERSION="v17.9"
 
-# --- 1. KEY LOADING LOGIC (CRITICAL FOR AUTO-UPDATE) ---
-# If env vars are provided (via your wget command), use them.
-# If NOT provided, try to load them from the existing installation file.
-
+# --- 1. KEY LOADING LOGIC ---
 EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
-
 if [[ -f "$EXISTING_CONF" ]]; then
-    # Load existing keys temporarily to check against
-    set +e
-    source "$EXISTING_CONF"
-    set -e
+    set +e; source "$EXISTING_CONF"; set -e
 fi
 
-# Prefer User Input > Existing Config > Empty
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-${ABUSEIPDB_API_KEY:-}}"
 CS_ENROLL="${CROWDSEC_ENROLL_KEY:-${CROWDSEC_ENROLL_KEY:-}}"
 DYNDNS="${DYNDNS_HOST:-${DYNDNS_HOST:-}}"
@@ -36,7 +28,7 @@ BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-${BLOCKLIST_COUNTRIES:-}}"
 TG_TOKEN="${TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
 
-# GITHUB CONFIG FOR AUTO-UPDATE
+# GITHUB CONFIG
 REPO_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main"
 
 # --- HELPER FUNCTIONS ---
@@ -71,7 +63,7 @@ echo "============================================="
 
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
 
-# --- OS DETECTION ---
+# --- OS & DEPENDENCIES ---
 wait_for_apt() {
     local count=0
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
@@ -96,7 +88,6 @@ elif command -v yum >/dev/null; then
     yum install -y epel-release || true
 else echo "❌ Unsupported OS"; exit 1; fi
 
-# --- DEPENDENCIES ---
 update_repo
 install_pkg curl ipset iptables unzip file gnupg logrotate endlessh
 
@@ -266,10 +257,9 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         if command -v docker >/dev/null; then cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true; fi
     fi
 
-    # FILE-BASED ENROLLMENT CHECK
     if [[ -n "$CS_ENROLL" ]]; then 
         if [[ -f "/etc/crowdsec/online_api_credentials.yaml" ]]; then
-            echo "✅ Agent is already enrolled (Credentials exist). Skipping."
+            echo "✅ Agent is already enrolled. Skipping."
         else
             echo "🔑 Enrolling Agent..."
             if cscli console enroll "$CS_ENROLL" --overwrite; then systemctl reload crowdsec || systemctl restart crowdsec; fi
@@ -316,13 +306,13 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- WRITE UPDATER WITH AUTO-UPDATE LOGIC ---
+# --- WRITE UPDATER WITH DIRECT SCRIPT CHECK ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_VERSION="v11.7"
+SCRIPT_VERSION="v11.9"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
@@ -349,16 +339,31 @@ mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 check_ipv6_stack() { if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi; if ! command -v ip6tables >/dev/null; then return 1; fi; return 0; }
 load_env_vars() { if [[ -f "\$KEYFILE" ]]; then set +u; set -a; source "\$KEYFILE"; set +a; set -u; fi; }
 
-# --- AUTO UPDATE LOGIC ---
+# --- INTELLIGENT AUTO-UPDATE (NO VERSION.TXT) ---
 perform_auto_update() {
-    local REMOTE_VER=\$(curl -s --max-time 5 "\$REPO_URL/version.txt" || echo "")
-    if [[ -n "\$REMOTE_VER" && "\$REMOTE_VER" != "\$SCRIPT_VERSION" ]]; then
-        if [[ "\$REMOTE_VER" =~ ^v[0-9] ]]; then
-            log "Update found: \$REMOTE_VER (Local: \$SCRIPT_VERSION). Upgrading..."
-            # RUN WITHOUT ARGS - installer will pick up existing keys
-            curl -sL "\$REPO_URL/install.sh" | sudo bash
+    # Download the remote installer to a temp file
+    local TMP_INSTALLER="/tmp/install_latest.sh"
+    if curl -sL --max-time 10 "\$REPO_URL/install.sh" -o "\$TMP_INSTALLER"; then
+        # Grep the version string from the file itself (looks for INSTALLER_VERSION="v...")
+        local REMOTE_VER=\$(grep -oE 'INSTALLER_VERSION="v[0-9]+\.[0-9]+"' "\$TMP_INSTALLER" | head -n1 | cut -d'"' -f2 || echo "")
+        
+        # Current local version (of the installer that installed this updater) is not stored,
+        # so we compare against the Updater Version or just install if it looks valid?
+        # Better strategy: We don't know the local INSTALLER version, but we know THIS script version.
+        # Let's assume if the remote installer has a higher version number than OUR known baseline, we run it.
+        # OR simpler: The installer updates THIS script to a new version (SCRIPT_VERSION).
+        # We check the remote install.sh, grep ITS internal 'SCRIPT_VERSION="v..."' for the updater.
+        
+        # LOGIC: Check if remote install.sh contains a newer SCRIPT_VERSION for the updater
+        local NEW_UPDATER_VER=\$(grep -oE 'SCRIPT_VERSION="v[0-9]+\.[0-9]+"' "\$TMP_INSTALLER" | head -n1 | cut -d'"' -f2 || echo "")
+        
+        if [[ -n "\$NEW_UPDATER_VER" && "\$NEW_UPDATER_VER" != "\$SCRIPT_VERSION" ]]; then
+            log "Update found: Installer carries \$NEW_UPDATER_VER (Local: \$SCRIPT_VERSION). Upgrading..."
+            bash "\$TMP_INSTALLER"
+            rm -f "\$TMP_INSTALLER"
             exit 0
         fi
+        rm -f "\$TMP_INSTALLER"
     fi
     return 0
 }
