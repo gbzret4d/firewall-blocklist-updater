@@ -2,26 +2,42 @@
 set -e
 set -o pipefail
 
-# --- Firewall & Sensor Installer (v17.6 - STABLE ENROLLMENT) ---
-# - FIX: Replaced fragile 'cscli status' check with robust file existence check
-# - LOGIC: Idempotent Setup + Nuclear Reset + Silent Updates
+# --- FIREWALL & CROWDSEC INSTALLER (v17.8 - FULL AUTONOMY) ---
+# - LOGIC: Loads existing keys from disk if run without arguments (for Auto-Update)
+# - BEHAVIOR: Silent on Success, Loud on Error
+# - FEAT: Idempotent Enrollment (File Check)
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.6"
-CURRENT_TASK="Initializing"
+INSTALLER_VERSION="v17.8"
 
-# --- CONFIGURATION ---
-ABUSE_KEY="${ABUSEIPDB_API_KEY:-}"
-CS_ENROLL="${CROWDSEC_ENROLL_KEY:-}"
-DYNDNS="${DYNDNS_HOST:-}"
-WL_COUNTRIES="${WHITELIST_COUNTRIES:-}"
-BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-}"
-TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
-TG_CHAT="${TELEGRAM_CHAT_ID:-}"
+# --- 1. KEY LOADING LOGIC (CRITICAL FOR AUTO-UPDATE) ---
+# If env vars are provided (via your wget command), use them.
+# If NOT provided, try to load them from the existing installation file.
+
+EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
+
+if [[ -f "$EXISTING_CONF" ]]; then
+    # Load existing keys temporarily to check against
+    set +e
+    source "$EXISTING_CONF"
+    set -e
+fi
+
+# Prefer User Input > Existing Config > Empty
+ABUSE_KEY="${ABUSEIPDB_API_KEY:-${ABUSEIPDB_API_KEY:-}}"
+CS_ENROLL="${CROWDSEC_ENROLL_KEY:-${CROWDSEC_ENROLL_KEY:-}}"
+DYNDNS="${DYNDNS_HOST:-${DYNDNS_HOST:-}}"
+WL_COUNTRIES="${WHITELIST_COUNTRIES:-${WHITELIST_COUNTRIES:-}}"
+BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-${BLOCKLIST_COUNTRIES:-}}"
+TG_TOKEN="${TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
+TG_CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
+
+# GITHUB CONFIG FOR AUTO-UPDATE
+REPO_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main"
 
 # --- HELPER FUNCTIONS ---
 get_server_identity() {
@@ -41,11 +57,11 @@ send_msg() {
 
 handle_error() {
     local line=$1
-    echo "❌ CRITICAL ERROR at line $line during task: '$CURRENT_TASK'"
+    echo "❌ CRITICAL ERROR at line $line"
     local LOG_TAIL=""; if command -v journalctl >/dev/null; then LOG_TAIL=$(journalctl -u crowdsec -n 10 --no-pager 2>/dev/null | tail -n 10); fi
     get_server_identity
     local OS_NAME="Unknown"; if [ -f /etc/os-release ]; then OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"'); fi
-    send_msg "🚨 <b>INSTALL CRASHED</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A<b>Task:</b> $CURRENT_TASK%0A<b>Line:</b> $line%0A%0A<b>Log Context:</b>%0A<pre>$LOG_TAIL</pre>"
+    send_msg "🚨 <b>INSTALL CRASHED</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A<b>Line:</b> $line%0A%0A<b>Log Context:</b>%0A<pre>$LOG_TAIL</pre>"
 }
 trap 'handle_error $LINENO' ERR
 
@@ -55,8 +71,7 @@ echo "============================================="
 
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
 
-# --- 1. OS DETECTION ---
-CURRENT_TASK="Detecting OS"
+# --- OS DETECTION ---
 wait_for_apt() {
     local count=0
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
@@ -81,8 +96,7 @@ elif command -v yum >/dev/null; then
     yum install -y epel-release || true
 else echo "❌ Unsupported OS"; exit 1; fi
 
-# --- 2. DEPENDENCIES ---
-CURRENT_TASK="Installing Dependencies"
+# --- DEPENDENCIES ---
 update_repo
 install_pkg curl ipset iptables unzip file gnupg logrotate endlessh
 
@@ -95,8 +109,7 @@ else
     systemctl enable --now chronyd 2>/dev/null || true
 fi
 
-# --- 3. CLEANUP ---
-CURRENT_TASK="Configuring Cleanup"
+# --- CLEANUP ---
 mkdir -p /etc/systemd/journald.conf.d
 echo -e "[Journal]\nSystemMaxUse=500M\nSystemMaxFileSize=100M\nMaxRetentionSec=2weeks" > /etc/systemd/journald.conf.d/00-limit-size.conf
 systemctl restart systemd-journald || true
@@ -128,13 +141,11 @@ TIME
 systemctl daemon-reload
 systemctl enable --now daily-system-cleanup.timer
 
-# --- 4. CROWDSEC SETUP ---
-CURRENT_TASK="CrowdSec Setup"
+# --- CROWDSEC SETUP ---
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
 harden_crowdsec_service() {
-    echo "🛡️ Hardening CrowdSec Systemd Service..."
     cat <<SERVICE > /lib/systemd/system/crowdsec.service
 [Unit]
 Description=Crowdsec agent
@@ -158,7 +169,6 @@ SERVICE
 }
 
 synthesize_configs() {
-    echo "🛠️ Synthesizing base configuration..."
     mkdir -p /etc/crowdsec
     if [[ ! -s /etc/crowdsec/acquis.yaml ]]; then
         echo -e "filenames:\n  - /var/log/syslog\n  - /var/log/auth.log\n  - /var/log/messages\nlabels:\n  type: syslog\n---" > /etc/crowdsec/acquis.yaml
@@ -174,7 +184,7 @@ purge_crowdsec() {
 }
 
 configure_and_start_crowdsec() {
-    # 0. SMART CHECK: IS IT ALREADY RUNNING HEALTHY?
+    # SMART CHECK
     if systemctl is-active --quiet crowdsec; then
         local CUR_PORT=$(grep "listen_uri:" /etc/crowdsec/config.yaml | awk -F':' '{print $3}' | tr -d ' ' || echo "8080")
         if [[ "$CUR_PORT" -ge 42000 && "$CUR_PORT" -le 42100 ]]; then
@@ -185,11 +195,8 @@ configure_and_start_crowdsec() {
         fi
     fi
 
-    # 1. Prepare
     harden_crowdsec_service
     synthesize_configs
-    
-    # 2. Cleanup
     systemctl stop crowdsec || true
     pkill -9 crowdsec || true
     sleep 2
@@ -202,9 +209,7 @@ configure_and_start_crowdsec() {
     while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
         local TEST_PORT=$((START_PORT + ATTEMPT))
         echo "🔧 Config Attempt on Port: $TEST_PORT ($((ATTEMPT+1))/$MAX_ATTEMPTS)"
-        
         if [[ ! -f "$CONFIG_FILE" ]]; then install_pkg crowdsec; harden_crowdsec_service; synthesize_configs; fi
-
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
         sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
         find /etc/crowdsec/bouncers/ -name "*.yaml" -exec sed -i -E "s/127\.0\.0\.1:[0-9]+/127.0.0.1:$TEST_PORT/g" {} + 2>/dev/null || true
@@ -218,7 +223,6 @@ configure_and_start_crowdsec() {
                 fi
             fi
         fi
-        
         echo "⚠️ Start failed on $TEST_PORT. Rotating..."
         systemctl stop crowdsec || true
         pkill -9 crowdsec || true
@@ -239,16 +243,12 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         purge_crowdsec
         install_pkg crowdsec
         if ! configure_and_start_crowdsec; then
-            echo "❌ CRITICAL: Even fresh install failed. Check system logs."
+            echo "❌ CRITICAL: Even fresh install failed."
             exit 1
         fi
     fi
     
-    CURRENT_TASK="Waiting for API"
-    for i in {1..20}; do
-        if cscli lapi status >/dev/null 2>&1; then break; fi
-        sleep 2
-    done
+    for i in {1..20}; do if cscli lapi status >/dev/null 2>&1; then break; fi; sleep 2; done
 
     if ! command -v crowdsec-firewall-bouncer >/dev/null; then
         install_pkg crowdsec-firewall-bouncer-iptables
@@ -266,15 +266,13 @@ if [[ -n "$CS_ENROLL" ]] || [[ "$CS_INSTALLED" == "false" ]]; then
         if command -v docker >/dev/null; then cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true; fi
     fi
 
-    # ROBUST ENROLLMENT CHECK
+    # FILE-BASED ENROLLMENT CHECK
     if [[ -n "$CS_ENROLL" ]]; then 
         if [[ -f "/etc/crowdsec/online_api_credentials.yaml" ]]; then
             echo "✅ Agent is already enrolled (Credentials exist). Skipping."
         else
             echo "🔑 Enrolling Agent..."
-            if cscli console enroll "$CS_ENROLL" --overwrite; then
-                systemctl reload crowdsec || systemctl restart crowdsec
-            fi
+            if cscli console enroll "$CS_ENROLL" --overwrite; then systemctl reload crowdsec || systemctl restart crowdsec; fi
         fi
     fi
 
@@ -314,183 +312,147 @@ YAML
     fi
 fi
 
-# --- 5. UPDATER ---
-CURRENT_TASK="Installing Updater"
 INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- WRITE UPDATER ---
-cat << 'EOF_UPDATER' > "$INSTALL_DIR/update-firewall-blocklists.sh"
+# --- WRITE UPDATER WITH AUTO-UPDATE LOGIC ---
+cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 SCRIPT_VERSION="v11.7"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
-CONFIG_DIR="$BASE_DIR/firewall-blocklists"
-KEYFILE="${KEYFILE:-$BASE_DIR/firewall-blocklist-keys.env}"
-SOURCE_FILE="$CONFIG_DIR/blocklist.sources"
-CUSTOM_WL_FILE="$CONFIG_DIR/whitelist.custom"
+CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
+KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
+SOURCE_FILE="\$CONFIG_DIR/blocklist.sources"
+CUSTOM_WL_FILE="\$CONFIG_DIR/whitelist.custom"
 LOCKFILE="/var/run/firewall-updater.lock"
 LOGFILE="/var/log/firewall-blocklist-updater.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 DRY_RUN=0
-IPV6_ENABLED=1
-USER_AGENT='Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+REPO_URL="$REPO_URL"
 
 manage_log_size() {
-    if [[ -f "$LOGFILE" ]]; then
-        local size=$(stat -c%s "$LOGFILE" 2>/dev/null || stat -f%z "$LOGFILE" 2>/dev/null || echo 0)
-        if [[ $size -gt $MAX_LOG_SIZE ]]; then tail -n 2000 "$LOGFILE" > "${LOGFILE}.tmp" && mv "${LOGFILE}.tmp" "$LOGFILE"; fi
+    if [[ -f "\$LOGFILE" ]]; then
+        local size=\$(stat -c%s "\$LOGFILE" 2>/dev/null || stat -f%z "\$LOGFILE" 2>/dev/null || echo 0)
+        if [[ \$size -gt \$MAX_LOG_SIZE ]]; then tail -n 2000 "\$LOGFILE" > "\$LOGFILE.tmp" && mv "\$LOGFILE.tmp" "\$LOGFILE"; fi
     fi
 }
-log() { echo -e "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $*" | tee -a "$LOGFILE"; }
-cleanup() { rm -f "$LOCKFILE" /tmp/firewall-blocklists/* 2>/dev/null || true; }
+log() { echo -e "\$(date '+%Y-%m-%d %H:%M:%S') [INFO] \$*" | tee -a "\$LOGFILE"; }
+cleanup() { rm -f "\$LOCKFILE" /tmp/firewall-blocklists/* 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
-mkdir -p "$BASE_DIR" "$CONFIG_DIR" /tmp/firewall-blocklists
+mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
 check_ipv6_stack() { if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi; if ! command -v ip6tables >/dev/null; then return 1; fi; return 0; }
-load_env_vars() { if [[ -f "$KEYFILE" ]]; then set +u; set -a; source "$KEYFILE"; set +a; set -u; fi; }
-perform_auto_update() { return 0; }
-check_connectivity() { if ! curl -s --head --request GET https://1.1.1.1 > /dev/null; then echo "No internet."; exit 0; fi; }
-repair_environment() { local HN=$(hostname); if ! grep -q "127.0.1.1 $HN" /etc/hosts; then echo "127.0.1.1 $HN" >> /etc/hosts; fi; }
+load_env_vars() { if [[ -f "\$KEYFILE" ]]; then set +u; set -a; source "\$KEYFILE"; set +a; set -u; fi; }
 
-# UPDATER IDENTITY LOGIC
+# --- AUTO UPDATE LOGIC ---
+perform_auto_update() {
+    local REMOTE_VER=\$(curl -s --max-time 5 "\$REPO_URL/version.txt" || echo "")
+    if [[ -n "\$REMOTE_VER" && "\$REMOTE_VER" != "\$SCRIPT_VERSION" ]]; then
+        if [[ "\$REMOTE_VER" =~ ^v[0-9] ]]; then
+            log "Update found: \$REMOTE_VER (Local: \$SCRIPT_VERSION). Upgrading..."
+            # RUN WITHOUT ARGS - installer will pick up existing keys
+            curl -sL "\$REPO_URL/install.sh" | sudo bash
+            exit 0
+        fi
+    fi
+    return 0
+}
+
+check_connectivity() { if ! curl -s --head --request GET https://1.1.1.1 > /dev/null; then echo "No internet."; exit 0; fi; }
+repair_environment() { local HN=\$(hostname); if ! grep -q "127.0.1.1 \$HN" /etc/hosts; then echo "127.0.1.1 \$HN" >> /etc/hosts; fi; }
+
 get_identity() {
-    HN=$(hostname)
-    IP=$(curl -s --max-time 2 http://ip-api.com/csv/?fields=query | cut -d',' -f1 || echo "Unknown-IP")
+    HN=\$(hostname)
+    IP=\$(curl -s --max-time 2 http://ip-api.com/csv/?fields=query | cut -d',' -f1 || echo "Unknown-IP")
 }
 
 send_telegram() { 
-    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then 
+    if [[ -n "\${TELEGRAM_BOT_TOKEN:-}" && -n "\${TELEGRAM_CHAT_ID:-}" ]]; then 
         get_identity
-        local MSG="<b>[$HN] ($IP)</b>%0A$1"
-        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" -d chat_id="$TELEGRAM_CHAT_ID" -d text="$MSG" -d parse_mode="HTML" >/dev/null || true; 
+        local MSG="<b>[\$HN] (\$IP)</b>%0A\$1"
+        curl -s -X POST "https://api.telegram.org/bot\$TELEGRAM_BOT_TOKEN/sendMessage" -d chat_id="\$TELEGRAM_CHAT_ID" -d text="\$MSG" -d parse_mode="HTML" >/dev/null || true; 
     fi 
 }
 
 TMPDIR="/tmp/firewall-blocklists"
 IPSET_WL="allowed_whitelist"; IPSET_BL="blocklist_all"
-get_set_count() { ipset list "$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
-smart_extract() { local f="$1"; if gzip -t "$f" 2>/dev/null; then zcat "$f"; elif unzip -t "$f" 2>/dev/null; then unzip -p "$f"; else cat "$f"; fi; }
+get_set_count() { ipset list "\$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
+smart_extract() { local f="\$1"; if gzip -t "\$f" 2>/dev/null; then zcat "\$f"; elif unzip -t "\$f" 2>/dev/null; then unzip -p "\$f"; else cat "\$f"; fi; }
 download_lists() {
-  local out="$1"; shift; local srcs=("$@"); : > "$TMPDIR/merge.lst"
-  for u in "${srcs[@]}"; do
-      local f=$(basename "$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
-      if curl -sfL --connect-timeout 10 --retry 1 -A "$USER_AGENT" "$u" -o "$TMPDIR/$f"; then
-          if [[ -s "$TMPDIR/$f" ]]; then smart_extract "$TMPDIR/$f" >> "$TMPDIR/merge.lst" || true; echo "" >> "$TMPDIR/merge.lst"; fi
+  local out="\$1"; shift; local srcs=("\$@"); : > "\$TMPDIR/merge.lst"
+  for u in "\${srcs[@]}"; do
+      local f=\$(basename "\$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
+      if curl -sfL --connect-timeout 10 --retry 1 -A "$USER_AGENT" "\$u" -o "\$TMPDIR/\$f"; then
+          if [[ -s "\$TMPDIR/\$f" ]]; then smart_extract "\$TMPDIR/\$f" >> "\$TMPDIR/merge.lst" || true; echo "" >> "\$TMPDIR/merge.lst"; fi
       fi
   done
-  sed -i 's/[#;].*//g' "$TMPDIR/merge.lst"; sort -u "$TMPDIR/merge.lst" > "$out"
+  sed -i 's/[#;].*//g' "\$TMPDIR/merge.lst"; sort -u "\$TMPDIR/merge.lst" > "\$out"
 }
 extract_ips() {
-    local input="$1"; local output="$2"; local family="$3"
-    [[ ! -f "$input" ]] && touch "$output" && return 0
-    if [[ "$family" == "inet" ]]; then grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$input" | grep -vE "^0\.0\.0\.0$" > "$output" || true
-    else grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$input" | grep -vE "^::" > "$output" || true; fi
+    local input="\$1"; local output="\$2"; local family="\$3"
+    [[ ! -f "\$input" ]] && touch "\$output" && return 0
+    if [[ "\$family" == "inet" ]]; then grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "\$input" | grep -vE "^0\.0\.0\.0$" > "\$output" || true
+    else grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "\$input" | grep -vE "^::" > "\$output" || true; fi
 }
 load_ipset() {
-  local file="$1"; local setname="$2"; local family="$3"
-  if [[ "$family" == "inet6" && $IPV6_ENABLED -eq 0 ]]; then return 0; fi
-  ipset create $setname hash:net family $family hashsize 4096 maxelem 2000000 -exist 2>/dev/null || true
-  if [[ ! -s "$file" ]]; then ipset flush $setname 2>/dev/null || true; return 0; fi
-  ipset flush "${setname}_tmp" 2>/dev/null || ipset create "${setname}_tmp" hash:net family $family hashsize 4096 maxelem 2000000 -exist
-  if ! sed "s/^/add ${setname}_tmp /" "$file" | ipset restore -! 2>/dev/null; then echo "Partial ipset restore"; fi
-  ipset swap "${setname}_tmp" "$setname"; ipset destroy "${setname}_tmp" 2>/dev/null || true
+  local file="\$1"; local setname="\$2"; local family="\$3"
+  if [[ "\$family" == "inet6" && \$IPV6_ENABLED -eq 0 ]]; then return 0; fi
+  ipset create \$setname hash:net family \$family hashsize 4096 maxelem 2000000 -exist 2>/dev/null || true
+  if [[ ! -s "\$file" ]]; then ipset flush \$setname 2>/dev/null || true; return 0; fi
+  ipset flush "\${setname}_tmp" 2>/dev/null || ipset create "\${setname}_tmp" hash:net family \$family hashsize 4096 maxelem 2000000 -exist
+  if ! sed "s/^/add \${setname}_tmp /" "\$file" | ipset restore -! 2>/dev/null; then echo "Partial ipset restore"; fi
+  ipset swap "\${setname}_tmp" "\$setname"; ipset destroy "\${setname}_tmp" 2>/dev/null || true
 }
 update_dyndns() {
-  [[ -z "$DYNDNS_HOST" ]] && return 0
-  local ip=$(dig +short "$DYNDNS_HOST" | head -n1 || true)
-  if [[ -n "$ip" ]]; then local t="$IPSET_WL"; [[ "$ip" =~ : ]] && t="${IPSET_WL}_v6"; ipset add "$t" "$ip" -exist 2>/dev/null || true; fi
+  [[ -z "\$DYNDNS_HOST" ]] && return 0
+  local ip=\$(dig +short "\$DYNDNS_HOST" | head -n1 || true)
+  if [[ -n "\$ip" ]]; then local t="\$IPSET_WL"; [[ "\$ip" =~ : ]] && t="\${IPSET_WL}_v6"; ipset add "\$t" "\$ip" -exist 2>/dev/null || true; fi
 }
 main() {
-  [[ "${1:-}" != "--post-update" && $DRY_RUN -eq 0 ]] && perform_auto_update "${1:-}"
-  manage_log_size; log "=== Update Start $SCRIPT_VERSION ==="; repair_environment
-  if [[ $HAS_FLOCK -eq 1 && $DRY_RUN -eq 0 ]]; then exec 9>"$LOCKFILE"; if ! flock -n 9; then echo "[ERROR] Locked."; exit 1; fi; fi
+  [[ "\${1:-}" != "--post-update" && \$DRY_RUN -eq 0 ]] && perform_auto_update
+  manage_log_size; log "=== Update Start \$SCRIPT_VERSION ==="; repair_environment
+  if [[ \$HAS_FLOCK -eq 1 && \$DRY_RUN -eq 0 ]]; then exec 9>"\$LOCKFILE"; if ! flock -n 9; then echo "[ERROR] Locked."; exit 1; fi; fi
   check_connectivity; load_env_vars
   if check_ipv6_stack; then IPV6_ENABLED=1; log "IPv6: Yes"; else IPV6_ENABLED=0; log "IPv6: No"; fi
-  local cnt_old_v4=$(get_set_count "$IPSET_BL")
+  local cnt_old_v4=\$(get_set_count "\$IPSET_BL")
   log "Processing..."
-  : > "$TMPDIR/wl_raw.lst"; local wl=(); 
-  for c in ${WHITELIST_COUNTRIES:-}; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
-  download_lists "$TMPDIR/wl_raw.lst" "${wl[@]}"
-  [[ -f "$CUSTOM_WL_FILE" ]] && cat "$CUSTOM_WL_FILE" >> "$TMPDIR/wl_raw.lst"
-  extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v4" "inet"; extract_ips "$TMPDIR/wl_raw.lst" "$TMPDIR/wl.v6" "inet6"
+  : > "\$TMPDIR/wl_raw.lst"; local wl=(); 
+  for c in \${WHITELIST_COUNTRIES:-}; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset"); done
+  download_lists "\$TMPDIR/wl_raw.lst" "\${wl[@]}"
+  [[ -f "\$CUSTOM_WL_FILE" ]] && cat "\$CUSTOM_WL_FILE" >> "\$TMPDIR/wl_raw.lst"
+  extract_ips "\$TMPDIR/wl_raw.lst" "\$TMPDIR/wl.v4" "inet"; extract_ips "\$TMPDIR/wl_raw.lst" "\$TMPDIR/wl.v6" "inet6"
 
-  local bl=(); [[ -f "$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "$CONFIG_DIR/blocklist.sources" || true)
-  for c in ${BLOCKLIST_COUNTRIES:-}; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_${c,,}.netset"); done
-  download_lists "$TMPDIR/bl_raw.lst" "${bl[@]}"
-  local line_count=$(wc -l < "$TMPDIR/bl_raw.lst" || echo 0)
-  if [[ $line_count -lt 5000 ]]; then send_telegram "⚠️ Too few IPs ($line_count). Skipping."; exit 0; fi
+  local bl=(); [[ -f "\$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "\$CONFIG_DIR/blocklist.sources" || true)
+  for c in \${BLOCKLIST_COUNTRIES:-}; do bl+=("https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset"); done
+  download_lists "\$TMPDIR/bl_raw.lst" "\${bl[@]}"
+  local line_count=\$(wc -l < "\$TMPDIR/bl_raw.lst" || echo 0)
+  if [[ \$line_count -lt 5000 ]]; then send_telegram "⚠️ Too few IPs (\$line_count). Skipping."; exit 0; fi
   
-  extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v4" "inet"; extract_ips "$TMPDIR/bl_raw.lst" "$TMPDIR/bl.v6" "inet6"
-  grep -vE "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)" "$TMPDIR/bl.v4" | sort -u | comm -23 - <(sort -u "$TMPDIR/wl.v4") > "$TMPDIR/bl_final.v4" || true
-  sort -u "$TMPDIR/bl.v6" | comm -23 - <(sort -u "$TMPDIR/wl.v6") > "$TMPDIR/bl_final.v6" || true
+  extract_ips "\$TMPDIR/bl_raw.lst" "\$TMPDIR/bl.v4" "inet"; extract_ips "\$TMPDIR/bl_raw.lst" "\$TMPDIR/bl.v6" "inet6"
+  grep -vE "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)" "\$TMPDIR/bl.v4" | sort -u | comm -23 - <(sort -u "\$TMPDIR/wl.v4") > "\$TMPDIR/bl_final.v4" || true
+  sort -u "\$TMPDIR/bl.v6" | comm -23 - <(sort -u "\$TMPDIR/wl.v6") > "\$TMPDIR/bl_final.v6" || true
 
-  load_ipset "$TMPDIR/wl.v4" "$IPSET_WL" "inet"; load_ipset "$TMPDIR/bl_final.v4" "$IPSET_BL" "inet"
-  load_ipset "$TMPDIR/wl.v6" "${IPSET_WL}_v6" "inet6"; load_ipset "$TMPDIR/bl_final.v6" "${IPSET_BL}_v6" "inet6"
+  load_ipset "\$TMPDIR/wl.v4" "\$IPSET_WL" "inet"; load_ipset "\$TMPDIR/bl_final.v4" "\$IPSET_BL" "inet"
+  load_ipset "\$TMPDIR/wl.v6" "\${IPSET_WL}_v6" "inet6"; load_ipset "\$TMPDIR/bl_final.v6" "\${IPSET_BL}_v6" "inet6"
 
-  if [[ $DRY_RUN -eq 0 ]]; then
-      iptables -C INPUT -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set "$IPSET_BL" src -j DROP
-      if iptables -L DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -m set --match-set "$IPSET_BL" src -j DROP 2>/dev/null || iptables -I DOCKER-USER -m set --match-set "$IPSET_BL" src -j DROP; fi
-      if [[ $IPV6_ENABLED -eq 1 ]]; then command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "${IPSET_BL}_v6" src -j DROP; }; fi
+  if [[ \$DRY_RUN -eq 0 ]]; then
+      iptables -C INPUT -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set "\$IPSET_BL" src -j DROP
+      if iptables -L DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || iptables -I DOCKER-USER -m set --match-set "\$IPSET_BL" src -j DROP; fi
+      if [[ \$IPV6_ENABLED -eq 1 ]]; then command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "\${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "\${IPSET_BL}_v6" src -j DROP; }; fi
       if command -v crowdsec >/dev/null; then iptables -C INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " 2>/dev/null || iptables -A INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " --log-level 4; fi
   fi
   update_dyndns
-  local cnt_new_v4=$(get_set_count "$IPSET_BL"); local diff_v4=$((cnt_new_v4 - cnt_old_v4))
-  log "Finished [IPv4: $cnt_new_v4 ($diff_v4)]"
+  local cnt_new_v4=\$(get_set_count "\$IPSET_BL"); local diff_v4=\$((cnt_new_v4 - cnt_old_v4))
+  log "Finished [IPv4: \$cnt_new_v4 (\$diff_v4)]"
 }
-main "${1:-}"
+main "\${1:-}"
 EOF_UPDATER
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
-
-# --- POPULATE SOURCES ---
-cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
-https://www.spamhaus.org/drop/drop.txt
-https://www.spamhaus.org/drop/edrop.txt
-https://www.spamhaus.org/drop/dropv6.txt
-https://feeds.dshield.org/block.txt
-https://feodotracker.abuse.ch/downloads/ipblocklist.txt
-https://sslbl.abuse.ch/blacklist/sslipblacklist.txt
-https://danger.rulez.sk/projects/bruteforceblocker/blist.php
-https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt
-https://blocklist.greensnow.co/greensnow.txt
-https://iplists.firehol.org/files/greensnow.ipset
-https://lists.blocklist.de/lists/all.txt
-https://www.blocklist.de/downloads/export-ips_all.txt
-https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt
-https://rules.emergingthreats.net/blockrules/compromised-ips.txt
-https://iplists.firehol.org/files/et_compromised.ipset
-https://www.binarydefense.com/banlist.txt
-https://iplists.firehol.org/files/bds_atif.ipset
-https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/binarydefense.txt
-https://github.com/borestad/blocklist-abuseipdb/raw/refs/heads/main/abuseipdb-s100-7d.ipv4
-https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/High
-https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/Extreme
-https://raw.githubusercontent.com/ShadowWhisperer/IPs/refs/heads/master/Malware/Hackers
-https://github.com/romainmarcoux/malicious-ip/raw/refs/heads/main/full-40k.txt
-https://raw.githubusercontent.com/romainmarcoux/malicious-outgoing-ip/refs/heads/main/full-outgoing-ip-40k.txt
-https://raw.githubusercontent.com/elliotwutingfeng/ThreatFox-IOC-IPs/refs/heads/main/ips.txt
-https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/cobaltstrike_ips.txt
-https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/alienvault.txt
-https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/compromised-ips.txt
-https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/illuminate.txt
-https://feodotracker.abuse.ch/downloads/ipblocklist.csv
-https://tracker.viriback.com/last30.php
-https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
-https://sslbl.abuse.ch/blacklist/sslbl.rpz
-https://cinsscore.com/list/ci-badguys.txt
-http://www.botvrij.eu/data/ioclist.ip-dst.raw
-https://iplists.firehol.org/files/cybercrime.ipset
-https://iplists.firehol.org/files/myip.ipset
-https://iplists.firehol.org/files/firehol_level1.netset
-https://iplists.firehol.org/files/sblam.ipset
-https://iplists.firehol.org/files/firehol_webclient.netset
-https://iplists.firehol.org/files/firehol_level2.netset
-https://iplists.firehol.org/files/botscout_7d.ipset
-SOURCES
 
 cat <<ENV > "$CONF_DIR/firewall-blocklist-keys.env"
 ABUSEIPDB_API_KEY="$ABUSE_KEY"
@@ -527,8 +489,6 @@ systemctl daemon-reload
 systemctl enable --now firewall-blocklist-updater.service
 systemctl enable --now firewall-blocklist-updater.timer
 
-# --- ENDLESSH CONFIG ---
-CURRENT_TASK="Configuring Endlessh"
 cat <<SERV > /lib/systemd/system/endlessh.service
 [Unit]
 Description=Endlessh SSH Tarpit (Custom)
@@ -563,7 +523,6 @@ fi
 CURRENT_TASK="Running Initial Update"
 $INSTALL_DIR/update-firewall-blocklists.sh
 
-# --- HEALTH CHECK ---
 CURRENT_TASK="Final Diagnostics"
 FAILED_SERVICES=""
 get_status() { systemctl is-active --quiet $1 && echo "Active" || echo "Failed"; }
@@ -573,11 +532,7 @@ get_status() { systemctl is-active --quiet $1 && echo "Active" || echo "Failed";
 [[ "$(get_status daily-system-cleanup.timer)" == "Active" ]] && echo "✅ Cleanup: OK" || { echo "❌ Cleanup: FAIL"; FAILED_SERVICES+="- Cleanup Timer%0A"; }
 
 if command -v iptables >/dev/null && iptables -L DOCKER-USER >/dev/null 2>&1; then
-    if iptables -C DOCKER-USER -m set --match-set blocklist_all src -j DROP 2>/dev/null; then
-        echo "✅ Docker Protection: OK"
-    else
-        echo "⚠️ Docker Protection: Rule Missing"
-    fi
+    if iptables -C DOCKER-USER -m set --match-set blocklist_all src -j DROP 2>/dev/null; then echo "✅ Docker Protection: OK"; else echo "⚠️ Docker Protection: Rule Missing"; fi
 fi
 
 if [[ -n "$FAILED_SERVICES" ]]; then
@@ -585,7 +540,6 @@ if [[ -n "$FAILED_SERVICES" ]]; then
     OS_NAME="Unknown"
     if [ -f /etc/os-release ]; then OS_NAME=$(grep -E '^(ID|PRETTY_NAME)=' /etc/os-release | head -n 1 | cut -d= -f2 | tr -d '"'); fi
     send_msg "⚠️ <b>INSTALL WARNING</b>%0A%0A<b>Host:</b> $(hostname)%0A<b>IP:</b> $SERVER_IP ($SERVER_CC)%0A<b>OS:</b> $OS_NAME%0A%0AThe following services failed:%0A$FAILED_SERVICES"
-    echo "⚠️ Warnings sent to Telegram."
 else
     echo "✅ INSTALLATION COMPLETE!"
 fi
