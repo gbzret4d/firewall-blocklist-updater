@@ -2,32 +2,41 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.15 - THE BULLDOZER) ---
-# - FIX: Flushes ALL firewall rules at start to prevent DNS blocking by old rules.
-# - FIX: Forces Google DNS (8.8.8.8) if local resolution fails.
-# - FIX: Runs 'dpkg --configure -a' to repair broken package states from previous crashes.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.16 - COMPATIBILITY MODE) ---
+# - FIX: Replaced 'curl --dns-servers' (incompatible with old OS) with system-level /etc/resolv.conf override.
+# - FIX: Ensures blocklists can be downloaded even if local DNS is broken.
 # - LOGIC: Auto-Update + Idempotent + Silent.
-# - COMPAT: Universal
+# - COMPAT: Universal (Works on old Debian/Ubuntu).
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.15"
+INSTALLER_VERSION="v17.16"
 
-# --- 0. PRE-FLIGHT: EMERGENCY CLEANUP ---
-# If the previous run crashed leaving bad firewall rules, DNS will fail.
-# We MUST flush iptables immediately to allow downloads/installs to succeed.
-echo "🧹 Pre-flight: Flushing firewall to ensure connectivity..."
+# --- 0. PRE-FLIGHT: FIREWALL FLUSH ---
+# Clear everything to ensure we can reach the internet/DNS
 iptables -P INPUT ACCEPT
 iptables -P FORWARD ACCEPT
 iptables -P OUTPUT ACCEPT
 iptables -F
 iptables -X
-# Also flush ipset if possible to clear bad lists
 if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
 
-# --- 1. KEY LOADING & RESCUE DEFAULTS ---
+# --- 0.1 HARD DNS REPAIR (The Fix for 'host not found') ---
+# If we can't resolve Google, we force Google DNS into the system configuration
+if ! getent hosts google.com >/dev/null 2>&1; then
+    echo "⚠️ System DNS is broken. Forcing Google DNS (8.8.8.8) into /etc/resolv.conf..."
+    # Backup existing
+    cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || true
+    # Overwrite
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    sleep 2
+    echo "✅ DNS patched."
+fi
+
+# --- 1. KEY LOADING ---
 EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
 if [[ -f "$EXISTING_CONF" ]]; then
     set +e; source "$EXISTING_CONF"; set -e
@@ -72,53 +81,27 @@ echo "============================================="
 echo "   FIREWALL & CROWDSEC INSTALLER ($INSTALLER_VERSION) "
 echo "============================================="
 
-if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
-
-# --- 1.5 DNS RESCUE ---
-# Check if DNS works. If not, force Google DNS to fix broken local resolvers.
-if ! ping -c 1 google.com >/dev/null 2>&1; then
-    echo "⚠️ DNS resolution failed. Forcing 8.8.8.8 into /etc/resolv.conf..."
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf
-    sleep 1
-fi
-
-# --- 2. OS & DEPENDENCIES ---
-wait_for_apt() {
-    local count=0
-    while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-        if [ $count -gt 30 ]; then break; fi
-        echo "⏳ Waiting for apt lock..."
-        sleep 2; count=$((count+1))
-    done
-}
-
-# REPAIR BROKEN DPKG STATES FROM PREVIOUS CRASHES
-if command -v dpkg >/dev/null; then
-    echo "🔧 repairing potential dpkg errors..."
-    dpkg --configure -a || true
-fi
+# --- OS & DEPENDENCIES ---
+if command -v dpkg >/dev/null; then dpkg --configure -a || true; fi
 
 if command -v apt-get >/dev/null; then
     PM="apt-get"
-    update_repo() { wait_for_apt; apt-get update -qq; }
-    install_pkg() { wait_for_apt; apt-get install -y "$@" || (sleep 5; apt-get install -y "$@"); }
-    purge_pkg() { wait_for_apt; apt-get purge -y "$@"; apt-get autoremove -y; }
+    # Try update, if DNS fails, it will fail but we patched resolv.conf above so it should work
+    apt-get update -qq || true 
+    install_pkg() { apt-get install -y "$@" || (sleep 5; apt-get install -y "$@"); }
+    purge_pkg() { apt-get purge -y "$@"; apt-get autoremove -y; }
 elif command -v dnf >/dev/null; then
-    PM="dnf"; update_repo() { :; }; install_pkg() { dnf install -y "$@"; }
+    PM="dnf"; install_pkg() { dnf install -y "$@"; }
     purge_pkg() { dnf remove -y "$@"; }
-    dnf install -y epel-release || true
 elif command -v yum >/dev/null; then
-    PM="yum"; update_repo() { :; }; install_pkg() { yum install -y "$@"; }
+    PM="yum"; install_pkg() { yum install -y "$@"; }
     purge_pkg() { yum remove -y "$@"; }
-    yum install -y epel-release || true
 else echo "❌ Unsupported OS"; exit 1; fi
 
-update_repo
 install_pkg curl ipset iptables unzip file gnupg logrotate endlessh
 
 if [[ "$PM" == "apt-get" ]]; then
-    install_pkg dnsutils apt-transport-https psmisc
-    if ! apt-get install -y iproute2; then apt-get install -y iproute; fi
+    install_pkg dnsutils apt-transport-https psmisc iproute2
     systemctl enable --now systemd-timesyncd 2>/dev/null || install_pkg chrony
 else
     install_pkg bind-utils iproute chrony
@@ -331,13 +314,13 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- WRITE UPDATER WITH NON-BLOCKING LOCK & PRIORITY RULES ---
+# --- WRITE UPDATER WITH SYSTEM DNS FIX ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_VERSION="v11.15"
+SCRIPT_VERSION="v11.16"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
@@ -361,13 +344,21 @@ trap cleanup EXIT INT TERM
 HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
+# --- FORCE DNS REPAIR IN UPDATER TOO ---
+fix_dns() {
+    if ! getent hosts google.com >/dev/null 2>&1; then
+        echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    fi
+}
+
 check_ipv6_stack() { if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi; if ! command -v ip6tables >/dev/null; then return 1; fi; return 0; }
 load_env_vars() { if [[ -f "\$KEYFILE" ]]; then set +u; set -a; source "\$KEYFILE"; set +a; set -u; fi; }
 
 perform_auto_update() {
+    fix_dns
     local TMP_INSTALLER="/tmp/install_latest.sh"
-    # USE GOOGLE DNS FOR UPDATE CHECK
-    if curl -sL --dns-servers 8.8.8.8 --max-time 10 "\$REPO_URL/install.sh" -o "\$TMP_INSTALLER"; then
+    # No --dns-servers flag here, because we fixed /etc/resolv.conf directly
+    if curl -sL --max-time 10 "\$REPO_URL/install.sh" -o "\$TMP_INSTALLER"; then
         local NEW_UPDATER_VER=\$(grep -oE 'SCRIPT_VERSION="v[0-9]+\.[0-9]+"' "\$TMP_INSTALLER" | head -n1 | cut -d'"' -f2 || echo "")
         if [[ -n "\$NEW_UPDATER_VER" && "\$NEW_UPDATER_VER" != "\$SCRIPT_VERSION" ]]; then
             log "Update found: Installer carries \$NEW_UPDATER_VER (Local: \$SCRIPT_VERSION). Upgrading..."
@@ -401,6 +392,7 @@ IPSET_WL="allowed_whitelist"; IPSET_BL="blocklist_all"
 get_set_count() { ipset list "\$1" -t 2>/dev/null | grep "Number of entries" | cut -d: -f2 | tr -d ' ' || echo 0; }
 smart_extract() { local f="\$1"; if gzip -t "\$f" 2>/dev/null; then zcat "\$f"; elif unzip -t "\$f" 2>/dev/null; then unzip -p "\$f"; else cat "\$f"; fi; }
 download_lists() {
+  fix_dns
   local out="\$1"; shift; local srcs=("\$@"); : > "\$TMPDIR/merge.lst"
   for u in "\${srcs[@]}"; do
       local f=\$(basename "\$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
@@ -426,6 +418,7 @@ load_ipset() {
   ipset swap "\${setname}_tmp" "\$setname"; ipset destroy "\${setname}_tmp" 2>/dev/null || true
 }
 update_dyndns() {
+  fix_dns
   [[ -z "\$DYNDNS_HOST" ]] && return 0
   local ip=""
   if ! ip=\$(dig +short "\$DYNDNS_HOST" | head -n1); then
@@ -469,10 +462,8 @@ main() {
       iptables -D INPUT -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || true
       iptables -D INPUT -m set --match-set "\$IPSET_WL" src -j ACCEPT 2>/dev/null || true
       
-      # DNS ALLOW - IMPORTANT TO AVOID LOCKOUTS
       iptables -I INPUT 1 -p udp --sport 53 -j ACCEPT
       iptables -I INPUT 2 -p tcp --sport 53 -j ACCEPT
-      
       iptables -I INPUT 3 -m set --match-set "\$IPSET_WL" src -j ACCEPT
       iptables -A INPUT -m set --match-set "\$IPSET_BL" src -j DROP
       
