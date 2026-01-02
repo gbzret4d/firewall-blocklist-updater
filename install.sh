@@ -3,25 +3,27 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.33 - VISUAL MODE) ---
-# - FIX: Re-enabled verbose output. You will see every download again.
-# - FEAT: AbuseIPDB Bridge & Docker Support included.
-# - FEAT: Full 32-List Source File (~170k IPs).
+# --- FIREWALL & CROWDSEC INSTALLER (v17.34 - ONE-TIME CLEANUP) ---
+# - FEAT: Updater performs a deep cleanup ONLY on the first run via marker file.
+# - FEAT: Full 32-List Source (~170k IPs).
+# - FEAT: AbuseIPDB Bridge & Docker Support.
+# - LOGIC: Verbose Output enabled.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.33"
+INSTALLER_VERSION="v17.34"
 
-# --- 1. CLEANUP (KILL SWITCH) ---
+# --- 1. CLEANUP (INSTALLER PHASE) ---
+# This cleans up immediately for the manual install.
 echo "🧹 Cleaning up old installations..."
 systemctl stop firewall-blocklist-updater.timer firewall-blocklist-updater.service endlessh crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
 rm -rf /usr/local/bin/update-firewall-blocklists.sh
 rm -f /var/run/firewall-updater.lock
 rm -rf /tmp/firewall-blocklists
 
-# Firewall Reset (Safety)
+# Firewall Reset
 iptables -P INPUT ACCEPT
 iptables -F
 iptables -X
@@ -33,7 +35,6 @@ fi
 iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
 # --- 2. CONFIG & DEPS ---
-# Load existing keys if present
 EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
 if [[ -f "$EXISTING_CONF" ]]; then set +e; source "$EXISTING_CONF"; set -e; fi
 
@@ -47,10 +48,8 @@ TG_CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
 REPO_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main"
 
 echo "📦 Installing Dependencies..."
-# DNS Fix
 if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf
-    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf; echo "nameserver 1.1.1.1" >> /etc/resolv.conf
 fi
 
 if command -v apt-get >/dev/null; then
@@ -60,11 +59,10 @@ elif command -v yum >/dev/null; then
     yum install -y curl wget ipset iptables unzip bind-utils endlessh
 fi
 
-# --- 3. CROWDSEC & PLUGINS ---
+# --- 3. CROWDSEC ---
 echo "🛡️ Setting up CrowdSec..."
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
-
 if [[ "$CS_INSTALLED" == "false" ]]; then
     curl -s -4 https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash 2>/dev/null || true
     apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables || true
@@ -80,7 +78,6 @@ done
 
 # AbuseIPDB Bridge
 if [[ -n "$ABUSE_KEY" ]]; then
-    echo "🌉 Building AbuseIPDB Bridge..."
     mkdir -p /etc/crowdsec/notifications
     cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
 type: http
@@ -110,15 +107,11 @@ fi
 
 # Docker
 if command -v docker >/dev/null; then
-    echo "🐳 Docker detected. Installing CrowdSec Docker Collection..."
     cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true
-    systemctl restart crowdsec
 fi
-
-if [[ -n "$CS_ENROLL" ]]; then 
-    cscli console enroll "$CS_ENROLL" --overwrite || true
-fi
+if [[ -n "$CS_ENROLL" ]]; then cscli console enroll "$CS_ENROLL" --overwrite || true; fi
 systemctl enable --now crowdsec || true
+systemctl restart crowdsec || true
 
 # --- 4. UPDATER CONFIG ---
 INSTALL_DIR="/usr/local/bin"
@@ -166,10 +159,10 @@ https://iplists.firehol.org/files/firehol_level2.netset
 https://iplists.firehol.org/files/botscout_7d.ipset
 SOURCES
 
-# --- UPDATER SCRIPT ---
+# --- UPDATER SCRIPT (WITH ONE-TIME CLEANUP LOGIC) ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.33 - Verbose Mode
+# v17.34 - One-Time Cleanup Version
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -177,12 +170,13 @@ CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
 LOGFILE="/var/log/firewall-blocklist-updater.log"
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-REPO_URL="$REPO_URL"
+CLEANUP_MARKER="\$BASE_DIR/.cleanup_v17_done"
 
 log() { echo -e "\$(date '+%Y-%m-%d %H:%M:%S') [INFO] \$*" | tee -a "\$LOGFILE"; }
 load_env_vars() { if [[ -f "\$KEYFILE" ]]; then set -a; source "\$KEYFILE"; set +a; fi; }
 load_env_vars
 
+# Telegram (Errors Only)
 send_telegram() { 
     if [[ -n "\${TELEGRAM_BOT_TOKEN:-}" && -n "\${TELEGRAM_CHAT_ID:-}" ]]; then 
         local MSG="<b>[\$(hostname)]</b> \$1"
@@ -190,19 +184,39 @@ send_telegram() {
     fi 
 }
 
-# Lock
+mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
+
+# === ONE-TIME CLEANUP LOGIC ===
+if [[ ! -f "\$CLEANUP_MARKER" ]]; then
+    log "⚠️ FIRST RUN: Executing One-Time Cleanup..."
+    
+    # 1. Kill hanging downloads or old scripts
+    pkill -f "wget" || true
+    
+    # 2. Force DNS Repair
+    if ! getent hosts google.com >/dev/null 2>&1; then echo "nameserver 8.8.8.8" > /etc/resolv.conf; fi
+    
+    # 3. Clear Temp
+    rm -rf /tmp/firewall-blocklists/*
+    
+    # 4. Remove old lockfiles
+    rm -f "/var/run/firewall-updater.lock"
+    
+    # 5. Create Marker
+    touch "\$CLEANUP_MARKER"
+    log "✅ Cleanup Complete. Future updates will be fast."
+fi
+# ==============================
+
+# Normal Lock
 if [ -f "/var/run/firewall-updater.lock" ]; then
     if [ \$(find "/var/run/firewall-updater.lock" -mmin +20) ]; then rm -f "/var/run/firewall-updater.lock"; else echo "Running."; exit 0; fi
 fi
 touch "/var/run/firewall-updater.lock"
 trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 
-mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
-if ! getent hosts google.com >/dev/null 2>&1; then echo "nameserver 8.8.8.8" > /etc/resolv.conf; fi
-
 TMPDIR="/tmp/firewall-blocklists"
-
-log "=== Start v11.33 ==="
+log "=== Start v11.34 ==="
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
@@ -210,10 +224,9 @@ for c in \${WHITELIST_COUNTRIES:-}; do
     curl -sfL -4 "https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset" >> "\$TMPDIR/wl_raw.lst" || true
 done
 if [[ -n "\$DYNDNS_HOST" ]]; then dig +short "\$DYNDNS_HOST" >> "\$TMPDIR/wl_raw.lst" || true; fi
-
 grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "\$TMPDIR/wl_raw.lst" | grep -vE "^0\.0\.0\.0$" > "\$TMPDIR/wl.v4"
 
-# 2. Blocklist (VERBOSE LOOP)
+# 2. Blocklist (Verbose)
 : > "\$TMPDIR/bl_raw.lst"
 
 if [[ -f "\$CONFIG_DIR/blocklist.sources" ]]; then
@@ -222,7 +235,6 @@ if [[ -f "\$CONFIG_DIR/blocklist.sources" ]]; then
         [[ "\$line" =~ ^#.*$ ]] && continue
         [[ -z "\$line" ]] && continue
         
-        # VISUAL OUTPUT
         echo -n "Downloading \$line ... "
         if wget --inet4-only --timeout=10 --tries=2 --user-agent="\$USER_AGENT" -qO- "\$line" >> "\$TMPDIR/bl_raw.lst"; then
             echo "OK"
@@ -260,7 +272,6 @@ iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/nu
 iptables -C INPUT -m set --match-set allowed_whitelist src -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -m set --match-set allowed_whitelist src -j ACCEPT
 iptables -C INPUT -m set --match-set blocklist_all src -j DROP 2>/dev/null || iptables -A INPUT -m set --match-set blocklist_all src -j DROP
 
-# Docker
 if iptables -L DOCKER-USER >/dev/null 2>&1; then
     iptables -C DOCKER-USER -m set --match-set allowed_whitelist src -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -m set --match-set allowed_whitelist src -j ACCEPT
     iptables -C DOCKER-USER -m set --match-set blocklist_all src -j DROP 2>/dev/null || iptables -A DOCKER-USER -m set --match-set blocklist_all src -j DROP
@@ -269,7 +280,6 @@ fi
 count=\$(ipset list blocklist_all -t | grep "Number of entries" | cut -d: -f2)
 log "Finished. Blocked IPv4: \$count"
 
-# ALERT ONLY
 if [[ "\$count" -lt 10000 ]]; then
     send_telegram "⚠️ WARNING: Low blocklist count (\$count). Check logs."
 fi
