@@ -2,19 +2,19 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.12 - EMERGENCY WHITELIST FIX) ---
-# - FIX: Hardcoded Emergency IP 84.113.40.8 to prevent lockout
-# - FIX: Ensures Whitelist rule is inserted at POSITION 1 in iptables
-# - LOGIC: Auto-Update + Idempotent + Silent
+# --- FIREWALL & CROWDSEC INSTALLER (v17.13 - PRIORITY RESCUE) ---
+# - FIX: IPTables now inserts an explicit ACCEPT rule for whitelists at position 1.
+# - FIX: Defaults to whitelisting Austria (AT) if no config is provided (Auto-Update Rescue).
+# - LOGIC: Whitelist always overrules Blocklist.
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.12"
+INSTALLER_VERSION="v17.13"
 
-# --- 1. KEY LOADING LOGIC ---
+# --- 1. KEY LOADING & RESCUE DEFAULTS ---
 EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
 if [[ -f "$EXISTING_CONF" ]]; then
     set +e; source "$EXISTING_CONF"; set -e
@@ -23,7 +23,11 @@ fi
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-${ABUSEIPDB_API_KEY:-}}"
 CS_ENROLL="${CROWDSEC_ENROLL_KEY:-${CROWDSEC_ENROLL_KEY:-}}"
 DYNDNS="${DYNDNS_HOST:-${DYNDNS_HOST:-}}"
-WL_COUNTRIES="${WHITELIST_COUNTRIES:-${WHITELIST_COUNTRIES:-}}"
+
+# RESCUE: Default to AT (Austria) whitelist during auto-update if var is empty
+# This saves you if DynDNS fails but you are coming from an Austrian IP.
+WL_COUNTRIES="${WHITELIST_COUNTRIES:-${WHITELIST_COUNTRIES:-AT}}"
+
 BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-${BLOCKLIST_COUNTRIES:-}}"
 TG_TOKEN="${TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
@@ -306,13 +310,13 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- WRITE UPDATER WITH EMERGENCY WHITELIST ---
+# --- WRITE UPDATER WITH PRIORITY ACCEPT RULES ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_VERSION="v11.12"
+SCRIPT_VERSION="v11.13"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
@@ -323,7 +327,6 @@ LOGFILE="/var/log/firewall-blocklist-updater.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 DRY_RUN=0
 REPO_URL="$REPO_URL"
-EMERGENCY_IP="84.113.40.8"
 
 manage_log_size() {
     if [[ -f "\$LOGFILE" ]]; then
@@ -340,10 +343,10 @@ mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 check_ipv6_stack() { if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi; if ! command -v ip6tables >/dev/null; then return 1; fi; return 0; }
 load_env_vars() { if [[ -f "\$KEYFILE" ]]; then set +u; set -a; source "\$KEYFILE"; set +a; set -u; fi; }
 
-# --- INTELLIGENT AUTO-UPDATE ---
 perform_auto_update() {
     local TMP_INSTALLER="/tmp/install_latest.sh"
-    if curl -sL --max-time 10 "\$REPO_URL/install.sh" -o "\$TMP_INSTALLER"; then
+    # FORCE GOOGLE DNS TO AVOID TIMEOUTS DURING UPDATE CHECK
+    if curl -sL --dns-servers 8.8.8.8 --max-time 10 "\$REPO_URL/install.sh" -o "\$TMP_INSTALLER"; then
         local NEW_UPDATER_VER=\$(grep -oE 'SCRIPT_VERSION="v[0-9]+\.[0-9]+"' "\$TMP_INSTALLER" | head -n1 | cut -d'"' -f2 || echo "")
         if [[ -n "\$NEW_UPDATER_VER" && "\$NEW_UPDATER_VER" != "\$SCRIPT_VERSION" ]]; then
             log "Update found: Installer carries \$NEW_UPDATER_VER (Local: \$SCRIPT_VERSION). Upgrading..."
@@ -403,7 +406,13 @@ load_ipset() {
 }
 update_dyndns() {
   [[ -z "\$DYNDNS_HOST" ]] && return 0
-  local ip=\$(dig +short "\$DYNDNS_HOST" | head -n1 || true)
+  
+  # TRY DNS RESOLUTION WITH FALLBACK
+  local ip=""
+  if ! ip=\$(dig +short "\$DYNDNS_HOST" | head -n1); then
+      ip=\$(dig +short @8.8.8.8 "\$DYNDNS_HOST" | head -n1 || true)
+  fi
+  
   if [[ -n "\$ip" ]]; then local t="\$IPSET_WL"; [[ "\$ip" =~ : ]] && t="\${IPSET_WL}_v6"; ipset add "\$t" "\$ip" -exist 2>/dev/null || true; fi
 }
 main() {
@@ -415,13 +424,12 @@ main() {
   local cnt_old_v4=\$(get_set_count "\$IPSET_BL")
   log "Processing..."
   : > "\$TMPDIR/wl_raw.lst"; local wl=(); 
+  
+  # RESCUE: LOAD COUNTRY WHITELISTS
   for c in \${WHITELIST_COUNTRIES:-}; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset"); done
   download_lists "\$TMPDIR/wl_raw.lst" "\${wl[@]}"
+  
   [[ -f "\$CUSTOM_WL_FILE" ]] && cat "\$CUSTOM_WL_FILE" >> "\$TMPDIR/wl_raw.lst"
-  
-  # --- EMERGENCY HARDCODED WHITELIST ADDITION ---
-  if [[ -n "\$EMERGENCY_IP" ]]; then echo "\$EMERGENCY_IP" >> "\$TMPDIR/wl_raw.lst"; fi
-  
   extract_ips "\$TMPDIR/wl_raw.lst" "\$TMPDIR/wl.v4" "inet"; extract_ips "\$TMPDIR/wl_raw.lst" "\$TMPDIR/wl.v6" "inet6"
 
   local bl=(); [[ -f "\$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "\$CONFIG_DIR/blocklist.sources" || true)
@@ -438,12 +446,30 @@ main() {
   load_ipset "\$TMPDIR/wl.v6" "\${IPSET_WL}_v6" "inet6"; load_ipset "\$TMPDIR/bl_final.v6" "\${IPSET_BL}_v6" "inet6"
 
   if [[ \$DRY_RUN -eq 0 ]]; then
-      # --- EMERGENCY: ACCEPT USER IP BEFORE ANY DROP RULE ---
-      iptables -C INPUT -s "\$EMERGENCY_IP" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -s "\$EMERGENCY_IP" -j ACCEPT
+      # --- CRITICAL FIX: EXPLICITLY ACCEPT WHITELIST BEFORE BLOCKING ---
+      # This ensures that even if an IP is in the blocklist, it gets ACCEPTED first.
+      iptables -D INPUT -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || true
+      iptables -D INPUT -m set --match-set "\$IPSET_WL" src -j ACCEPT 2>/dev/null || true
       
-      iptables -C INPUT -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set "\$IPSET_BL" src -j DROP
-      if iptables -L DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || iptables -I DOCKER-USER -m set --match-set "\$IPSET_BL" src -j DROP; fi
-      if [[ \$IPV6_ENABLED -eq 1 ]]; then command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "\${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "\${IPSET_BL}_v6" src -j DROP; }; fi
+      iptables -I INPUT 1 -m set --match-set "\$IPSET_WL" src -j ACCEPT
+      iptables -A INPUT -m set --match-set "\$IPSET_BL" src -j DROP
+      
+      if iptables -L DOCKER-USER >/dev/null 2>&1; then 
+          iptables -D DOCKER-USER -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || true
+          iptables -D DOCKER-USER -m set --match-set "\$IPSET_WL" src -j ACCEPT 2>/dev/null || true
+          iptables -I DOCKER-USER 1 -m set --match-set "\$IPSET_WL" src -j ACCEPT
+          iptables -A DOCKER-USER -m set --match-set "\$IPSET_BL" src -j DROP
+      fi
+      
+      if [[ \$IPV6_ENABLED -eq 1 ]]; then 
+          if command -v ip6tables >/dev/null; then
+             ip6tables -D INPUT -m set --match-set "\${IPSET_BL}_v6" src -j DROP 2>/dev/null || true
+             ip6tables -D INPUT -m set --match-set "\${IPSET_WL}_v6" src -j ACCEPT 2>/dev/null || true
+             ip6tables -I INPUT 1 -m set --match-set "\${IPSET_WL}_v6" src -j ACCEPT
+             ip6tables -A INPUT -m set --match-set "\${IPSET_BL}_v6" src -j DROP
+          fi
+      fi
+      
       if command -v crowdsec >/dev/null; then iptables -C INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " 2>/dev/null || iptables -A INPUT -m limit --limit 10/min -j LOG --log-prefix "IPTables-Dropped: " --log-level 4; fi
   fi
   update_dyndns
