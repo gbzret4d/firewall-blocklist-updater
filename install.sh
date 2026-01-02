@@ -3,26 +3,40 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.32 - CLEAN SLATE) ---
-# - ACTION: Removes old scripts/configs before installing.
-# - FEAT: AbuseIPDB Reporting Bridge (CrowdSec -> AbuseIPDB).
-# - FEAT: Docker Support (IPTables DOCKER-USER chain & CS Collection).
-# - OS: Legacy Debian/Ubuntu compatible.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.33 - VISUAL MODE) ---
+# - FIX: Re-enabled verbose output. You will see every download again.
+# - FEAT: AbuseIPDB Bridge & Docker Support included.
+# - FEAT: Full 32-List Source File (~170k IPs).
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.32"
+INSTALLER_VERSION="v17.33"
 
-# --- 1. CONFIGURATION ---
-# Keys werden übernommen oder aus alten Configs gerettet, falls vorhanden
-EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
-if [[ -f "$EXISTING_CONF" ]]; then
-    set +e; source "$EXISTING_CONF"; set -e
+# --- 1. CLEANUP (KILL SWITCH) ---
+echo "🧹 Cleaning up old installations..."
+systemctl stop firewall-blocklist-updater.timer firewall-blocklist-updater.service endlessh crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
+rm -rf /usr/local/bin/update-firewall-blocklists.sh
+rm -f /var/run/firewall-updater.lock
+rm -rf /tmp/firewall-blocklists
+
+# Firewall Reset (Safety)
+iptables -P INPUT ACCEPT
+iptables -F
+iptables -X
+if command -v ipset >/dev/null; then 
+    ipset destroy blocklist_all 2>/dev/null || true
+    ipset destroy allowed_whitelist 2>/dev/null || true
+    ipset flush 2>/dev/null || true
 fi
+iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# Hier deine Keys eintragen oder als Umgebungsvariable übergeben
+# --- 2. CONFIG & DEPS ---
+# Load existing keys if present
+EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
+if [[ -f "$EXISTING_CONF" ]]; then set +e; source "$EXISTING_CONF"; set -e; fi
+
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-${ABUSEIPDB_API_KEY:-}}"
 CS_ENROLL="${CROWDSEC_ENROLL_KEY:-${CROWDSEC_ENROLL_KEY:-}}"
 DYNDNS="${DYNDNS_HOST:-${DYNDNS_HOST:-}}"
@@ -32,31 +46,6 @@ TG_TOKEN="${TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
 REPO_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main"
 
-# --- 2. THE CLEANUP (KILL SWITCH) ---
-echo "🧹 Cleaning up old installations..."
-# Stop Services
-systemctl stop firewall-blocklist-updater.timer firewall-blocklist-updater.service endlessh crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
-systemctl disable firewall-blocklist-updater.timer firewall-blocklist-updater.service 2>/dev/null || true
-
-# Remove Files
-rm -rf /usr/local/bin/update-firewall-blocklists.sh
-rm -rf /etc/systemd/system/firewall-blocklist-updater.*
-rm -f /var/run/firewall-updater.lock
-rm -rf /tmp/firewall-blocklists
-
-# Flush Firewall (Safety: Allow Input first)
-iptables -P INPUT ACCEPT
-iptables -F
-iptables -X
-if command -v ipset >/dev/null; then 
-    ipset destroy blocklist_all 2>/dev/null || true
-    ipset destroy allowed_whitelist 2>/dev/null || true
-    ipset flush 2>/dev/null || true
-fi
-# Restore Safety Rule for SSH
-iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-
-# --- 3. SYSTEM PREP ---
 echo "📦 Installing Dependencies..."
 # DNS Fix
 if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
@@ -64,31 +53,24 @@ if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
     echo "nameserver 1.1.1.1" >> /etc/resolv.conf
 fi
 
-# Package Install
 if command -v apt-get >/dev/null; then
     apt-get update -qq || true
-    apt-get install -y curl wget ipset iptables unzip dnsutils gnupg logrotate || true
-    # Install Endlessh if missing
-    if ! command -v endlessh >/dev/null; then apt-get install -y endlessh || true; fi
+    apt-get install -y curl wget ipset iptables unzip dnsutils gnupg logrotate endlessh || true
 elif command -v yum >/dev/null; then
     yum install -y curl wget ipset iptables unzip bind-utils endlessh
 fi
 
-# --- 4. CROWDSEC SETUP ---
+# --- 3. CROWDSEC & PLUGINS ---
 echo "🛡️ Setting up CrowdSec..."
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
 if [[ "$CS_INSTALLED" == "false" ]]; then
     curl -s -4 https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash 2>/dev/null || true
-    if command -v apt-get >/dev/null; then
-        apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables || true
-    else
-        yum install -y crowdsec crowdsec-firewall-bouncer-iptables || true
-    fi
+    apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables || true
 fi
 
-# FIX: Plugin Crashes (History Fix)
+# Plugin Fix
 rm -f /usr/lib/crowdsec/plugins/dummy 2>/dev/null || true
 for plugin in http email slack splunk; do
     if [[ -f "/usr/lib/crowdsec/plugins/$plugin" ]]; then
@@ -96,7 +78,7 @@ for plugin in http email slack splunk; do
     fi
 done
 
-# CONFIG: AbuseIPDB Bridge
+# AbuseIPDB Bridge
 if [[ -n "$ABUSE_KEY" ]]; then
     echo "🌉 Building AbuseIPDB Bridge..."
     mkdir -p /etc/crowdsec/notifications
@@ -117,9 +99,7 @@ headers:
   Content-Type: application/json
   Accept: application/json
 YAML
-    # Activate in profiles.yaml
     if ! grep -q "abuseipdb" /etc/crowdsec/profiles.yaml 2>/dev/null; then
-        # Simple append if not present (assuming default structure)
         if grep -q "notifications:" /etc/crowdsec/profiles.yaml; then
             sed -i '/notifications:/a \ - abuseipdb' /etc/crowdsec/profiles.yaml
         else
@@ -128,26 +108,24 @@ YAML
     fi
 fi
 
-# CONFIG: Docker
+# Docker
 if command -v docker >/dev/null; then
     echo "🐳 Docker detected. Installing CrowdSec Docker Collection..."
     cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true
     systemctl restart crowdsec
 fi
 
-# Enrollment
 if [[ -n "$CS_ENROLL" ]]; then 
     cscli console enroll "$CS_ENROLL" --overwrite || true
 fi
 systemctl enable --now crowdsec || true
-systemctl restart crowdsec || true
 
-# --- 5. UPDATER SETUP ---
+# --- 4. UPDATER CONFIG ---
 INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- SOURCES (Your Full 32 List) ---
+# --- SOURCES (Full 32 List) ---
 cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 https://www.spamhaus.org/drop/drop.txt
 https://www.spamhaus.org/drop/edrop.txt
@@ -191,7 +169,7 @@ SOURCES
 # --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.32 - Clean Install Version
+# v17.33 - Verbose Mode
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -199,14 +177,12 @@ CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
 LOGFILE="/var/log/firewall-blocklist-updater.log"
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+REPO_URL="$REPO_URL"
 
-# Logging
 log() { echo -e "\$(date '+%Y-%m-%d %H:%M:%S') [INFO] \$*" | tee -a "\$LOGFILE"; }
+load_env_vars() { if [[ -f "\$KEYFILE" ]]; then set -a; source "\$KEYFILE"; set +a; fi; }
+load_env_vars
 
-# Load Keys
-if [[ -f "\$KEYFILE" ]]; then set -a; source "\$KEYFILE"; set +a; fi
-
-# Telegram (Error Only)
 send_telegram() { 
     if [[ -n "\${TELEGRAM_BOT_TOKEN:-}" && -n "\${TELEGRAM_CHAT_ID:-}" ]]; then 
         local MSG="<b>[\$(hostname)]</b> \$1"
@@ -215,19 +191,18 @@ send_telegram() {
 }
 
 # Lock
-LOCKFILE="/var/run/firewall-updater.lock"
-if [ -f "\$LOCKFILE" ]; then
-    if [ \$(find "\$LOCKFILE" -mmin +20) ]; then rm -f "\$LOCKFILE"; else exit 0; fi
+if [ -f "/var/run/firewall-updater.lock" ]; then
+    if [ \$(find "/var/run/firewall-updater.lock" -mmin +20) ]; then rm -f "/var/run/firewall-updater.lock"; else echo "Running."; exit 0; fi
 fi
-touch "\$LOCKFILE"
-trap 'rm -f "\$LOCKFILE" /tmp/firewall-blocklists/*' EXIT
+touch "/var/run/firewall-updater.lock"
+trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
+if ! getent hosts google.com >/dev/null 2>&1; then echo "nameserver 8.8.8.8" > /etc/resolv.conf; fi
 
-# Helper
-extract_ips() {
-    grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "\$1" | grep -vE "^0\.0\.0\.0$" > "\$2" || true
-}
+TMPDIR="/tmp/firewall-blocklists"
+
+log "=== Start v11.33 ==="
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
@@ -235,19 +210,35 @@ for c in \${WHITELIST_COUNTRIES:-}; do
     curl -sfL -4 "https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset" >> "\$TMPDIR/wl_raw.lst" || true
 done
 if [[ -n "\$DYNDNS_HOST" ]]; then dig +short "\$DYNDNS_HOST" >> "\$TMPDIR/wl_raw.lst" || true; fi
-extract_ips "\$TMPDIR/wl_raw.lst" "\$TMPDIR/wl.v4"
 
-# 2. Blocklist (Wget Batch)
+grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "\$TMPDIR/wl_raw.lst" | grep -vE "^0\.0\.0\.0$" > "\$TMPDIR/wl.v4"
+
+# 2. Blocklist (VERBOSE LOOP)
 : > "\$TMPDIR/bl_raw.lst"
-: > "\$TMPDIR/urls_clean.txt"
+
 if [[ -f "\$CONFIG_DIR/blocklist.sources" ]]; then
-    grep -vE "^\s*#|^$" "\$CONFIG_DIR/blocklist.sources" | tr -d '\r' > "\$TMPDIR/urls_clean.txt"
-    wget --inet4-only --timeout=15 --tries=2 --user-agent="\$USER_AGENT" -i "\$TMPDIR/urls_clean.txt" -O - >> "\$TMPDIR/bl_raw.lst" 2>/dev/null || true
+    while read -r line; do
+        line=\$(echo "\$line" | tr -d '\r' | xargs)
+        [[ "\$line" =~ ^#.*$ ]] && continue
+        [[ -z "\$line" ]] && continue
+        
+        # VISUAL OUTPUT
+        echo -n "Downloading \$line ... "
+        if wget --inet4-only --timeout=10 --tries=2 --user-agent="\$USER_AGENT" -qO- "\$line" >> "\$TMPDIR/bl_raw.lst"; then
+            echo "OK"
+            echo "" >> "\$TMPDIR/bl_raw.lst"
+        else
+            echo "FAIL"
+            log "Failed: \$line"
+        fi
+    done < "\$CONFIG_DIR/blocklist.sources"
 fi
+
 for c in \${BLOCKLIST_COUNTRIES:-}; do 
     curl -sfL -4 "https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset" >> "\$TMPDIR/bl_raw.lst" || true
 done
-extract_ips "\$TMPDIR/bl_raw.lst" "\$TMPDIR/bl.v4"
+
+grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "\$TMPDIR/bl_raw.lst" | grep -vE "^0\.0\.0\.0$" > "\$TMPDIR/bl.v4"
 
 # Filter
 comm -23 <(sort "\$TMPDIR/bl.v4") <(sort "\$TMPDIR/wl.v4") > "\$TMPDIR/bl_final.v4"
@@ -269,7 +260,7 @@ iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/nu
 iptables -C INPUT -m set --match-set allowed_whitelist src -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -m set --match-set allowed_whitelist src -j ACCEPT
 iptables -C INPUT -m set --match-set blocklist_all src -j DROP 2>/dev/null || iptables -A INPUT -m set --match-set blocklist_all src -j DROP
 
-# Docker Rules (Insert if Docker exists)
+# Docker
 if iptables -L DOCKER-USER >/dev/null 2>&1; then
     iptables -C DOCKER-USER -m set --match-set allowed_whitelist src -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -m set --match-set allowed_whitelist src -j ACCEPT
     iptables -C DOCKER-USER -m set --match-set blocklist_all src -j DROP 2>/dev/null || iptables -A DOCKER-USER -m set --match-set blocklist_all src -j DROP
@@ -278,13 +269,13 @@ fi
 count=\$(ipset list blocklist_all -t | grep "Number of entries" | cut -d: -f2)
 log "Finished. Blocked IPv4: \$count"
 
+# ALERT ONLY
 if [[ "\$count" -lt 10000 ]]; then
     send_telegram "⚠️ WARNING: Low blocklist count (\$count). Check logs."
 fi
 EOF_UPDATER
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
 
-# --- 6. KEYS ---
 cat <<ENV > "$CONF_DIR/firewall-blocklist-keys.env"
 ABUSEIPDB_API_KEY="$ABUSE_KEY"
 DYNDNS_HOST="$DYNDNS"
@@ -295,7 +286,6 @@ TELEGRAM_CHAT_ID="$TG_CHAT"
 ENV
 chmod 600 "$CONF_DIR/firewall-blocklist-keys.env"
 
-# --- 7. SERVICES ---
 cat <<SERV > /etc/systemd/system/firewall-blocklist-updater.service
 [Unit]
 Description=Firewall Blocklist Updater
@@ -308,7 +298,7 @@ WantedBy=multi-user.target
 SERV
 cat <<TIME > /etc/systemd/system/firewall-blocklist-updater.timer
 [Unit]
-Description=Run Firewall Blocklist Updater Hourly
+Description=Hourly Update
 [Timer]
 OnCalendar=hourly
 RandomizedDelaySec=300
@@ -319,10 +309,9 @@ TIME
 systemctl daemon-reload
 systemctl enable --now firewall-blocklist-updater.timer
 
-# Endlessh Service
 cat <<SERV > /lib/systemd/system/endlessh.service
 [Unit]
-Description=Endlessh SSH Tarpit
+Description=Endlessh
 After=network.target
 [Service]
 Type=simple
@@ -334,7 +323,7 @@ SERV
 systemctl daemon-reload
 if command -v endlessh >/dev/null; then systemctl enable --now endlessh || true; fi
 
-echo "🚀 Running initial update (this takes time)..."
+echo "🚀 Running initial update (Labermodus ON)..."
 $INSTALL_DIR/update-firewall-blocklists.sh
 
-echo "✅ INSTALLATION COMPLETE! (AbuseIPDB Bridge Active)"
+echo "✅ INSTALLATION COMPLETE!"
