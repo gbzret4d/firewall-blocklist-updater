@@ -8,6 +8,10 @@ https://sslbl.abuse.ch/blacklist/sslipblacklist.txt
 https://danger.rulez.sk/projects/bruteforceblocker/blist.php
 
 # --- Aggregators ---
+https://raw.githubusercontent.com/stamparm/ipsum/master/levels/5.txt
+# https://raw.githubusercontent.com/stamparm/ipsum/master/levels/6.txt
+# https://raw.githubusercontent.com/stamparm/ipsum/master/levels/7.txt
+# https://raw.githubusercontent.com/stamparm/ipsum/master/levels/8.txt
 https://blocklist.greensnow.co/greensnow.txt
 https://iplists.firehol.org/files/greensnow.ipset
 https://lists.blocklist.de/lists/all.txt
@@ -32,10 +36,6 @@ https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/Extreme
 https://raw.githubusercontent.com/ShadowWhisperer/IPs/refs/heads/master/Malware/Hackers
 https://github.com/romainmarcoux/malicious-ip/raw/refs/heads/main/full-40k.txt
 https://raw.githubusercontent.com/romainmarcoux/malicious-outgoing-ip/refs/heads/main/full-outgoing-ip-40k.txt
-https://raw.githubusercontent.com/stamparm/ipsum/master/levels/5.txt
-https://raw.githubusercontent.com/stamparm/ipsum/master/levels/6.txt
-https://raw.githubusercontent.com/stamparm/ipsum/master/levels/7.txt
-https://raw.githubusercontent.com/stamparm/ipsum/master/levels/8.txt
 
 # --- IOCs & C2 ---
 https://raw.githubusercontent.com/elliotwutingfeng/ThreatFox-IOC-IPs/refs/heads/main/ips.txt
