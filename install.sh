@@ -3,40 +3,31 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.22 - THE MISSING LINK FIX) ---
-# - FIX: Re-added the blocklist.sources generation (was missing in v17.21).
-# - FIX: Creates empty ipsets unconditionally so iptables never crashes on startup.
-# - LOGIC: Whitelist > Blocklist. IPv4 Enforced.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.24 - WGET BATCH) ---
+# - FIX: Removed fragile Bash 'while-read' loops.
+# - FIX: Uses 'wget -i' to download all lists in one robust OS process.
+# - FIX: Default Policy ACCEPT to prevent lockout during flush.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.22"
+INSTALLER_VERSION="v17.24"
 
-# --- 0. IMMEDIATE SAFETY NET ---
-# Allow existing connections immediately
+# --- 0. SAFETY NET ---
 iptables -P INPUT ACCEPT
 iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-
-# Cleanup
 rm -f /var/run/firewall-updater.lock
 pkill -f update-firewall-blocklists.sh || true
-
-# Flush (Safe)
 iptables -F
 iptables -X
 if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
-
-# Restore Safety Rule
 iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
 # --- 0.1 DNS REPAIR ---
 if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
-    echo "⚠️ DNS Repair initiated..."
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
     echo "nameserver 1.1.1.1" >> /etc/resolv.conf
-    sleep 2
 fi
 
 # --- 1. CONFIG ---
@@ -88,7 +79,7 @@ elif command -v yum >/dev/null; then
     purge_pkg() { yum remove -y "$@"; }
 else echo "❌ Unsupported OS"; exit 1; fi
 
-install_pkg curl ipset iptables unzip file gnupg logrotate endlessh
+install_pkg curl wget ipset iptables unzip file gnupg logrotate endlessh
 
 if [[ "$PM" == "apt-get" ]]; then
     install_pkg dnsutils apt-transport-https psmisc iproute2
@@ -135,7 +126,7 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- RE-ADDED MISSING SOURCE FILE GENERATION ---
+# --- SOURCES ---
 cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 # --- High Confidence ---
 https://www.spamhaus.org/drop/drop.txt
@@ -201,10 +192,10 @@ SOURCES
 # --- WRITE UPDATER ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# NO set -e
+# FAULT TOLERANT MODE
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_VERSION="v11.22"
+SCRIPT_VERSION="v11.24"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
@@ -246,7 +237,7 @@ TMPDIR="/tmp/firewall-blocklists"
 IPSET_WL="allowed_whitelist"
 IPSET_BL="blocklist_all"
 
-# 4. Helpers
+# Helpers
 extract_ips() {
     local input="\$1"; local output="\$2"; local family="\$3"
     [[ ! -f "\$input" ]] && touch "\$output" && return 0
@@ -261,7 +252,6 @@ load_ipset() {
   local file="\$1"; local setname="\$2"; local family="\$3"
   if [[ "\$family" == "inet6" ]]; then if [ ! -f /proc/net/if_inet6 ]; then return 0; fi; fi
   
-  # ALWAYS create set, even if empty, to prevent iptables crash
   ipset create \$setname hash:net family \$family hashsize 4096 maxelem 2000000 -exist 2>/dev/null || true
   ipset flush "\${setname}_tmp" 2>/dev/null || ipset create "\${setname}_tmp" hash:net family \$family hashsize 4096 maxelem 2000000 -exist
   
@@ -274,7 +264,7 @@ load_ipset() {
 }
 
 # 5. Build Lists
-# Initialize sets immediately to avoid "set does not exist" error
+# Init Sets
 ipset create \$IPSET_WL hash:net family inet hashsize 4096 maxelem 2000000 -exist 2>/dev/null || true
 ipset create \$IPSET_BL hash:net family inet hashsize 4096 maxelem 2000000 -exist 2>/dev/null || true
 
@@ -290,16 +280,20 @@ fi
 extract_ips "\$TMPDIR/wl_raw.lst" "\$TMPDIR/wl.v4" "inet"
 extract_ips "\$TMPDIR/wl_raw.lst" "\$TMPDIR/wl.v6" "inet6"
 
+# --- NEW ROBUST DOWNLOAD LOGIC (NO LOOPS) ---
 : > "\$TMPDIR/bl_raw.lst"
+: > "\$TMPDIR/urls_clean.txt"
+
 if [[ -f "\$CONFIG_DIR/blocklist.sources" ]]; then
-    while read -r line; do
-        [[ "\$line" =~ ^#.*$ ]] && continue
-        [[ -z "\$line" ]] && continue
-        curl -sfL -4 --connect-timeout 10 --retry 2 "\$line" >> "\$TMPDIR/bl_raw.lst" || log "Skipped: \$line"
-        echo "" >> "\$TMPDIR/bl_raw.lst"
-    done < "\$CONFIG_DIR/blocklist.sources"
+    # Create clean URL list (remove comments, empty lines)
+    grep -vE "^\s*#|^$" "\$CONFIG_DIR/blocklist.sources" | tr -d '\r' > "\$TMPDIR/urls_clean.txt"
+    
+    log "Downloading blocklists (Batch Mode)..."
+    # Use wget -i to handle list processing robustly
+    wget --inet4-only --timeout=15 --tries=2 -i "\$TMPDIR/urls_clean.txt" -O - >> "\$TMPDIR/bl_raw.lst" 2>/dev/null || true
 fi
 
+# Manual Country download loop (safer to keep separate)
 for c in \${BLOCKLIST_COUNTRIES:-}; do 
     curl -sfL -4 "https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset" >> "\$TMPDIR/bl_raw.lst" || true
 done
