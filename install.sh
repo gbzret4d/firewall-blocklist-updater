@@ -2,20 +2,19 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.16 - COMPATIBILITY MODE) ---
-# - FIX: Replaced 'curl --dns-servers' (incompatible with old OS) with system-level /etc/resolv.conf override.
-# - FIX: Ensures blocklists can be downloaded even if local DNS is broken.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.17 - IPV4 ENFORCER) ---
+# - FIX: Forces curl to use IPv4 (-4) for blocklist downloads to bypass broken IPv6 stacks.
+# - FIX: Added verbose logging for failed downloads to identify specific list errors.
 # - LOGIC: Auto-Update + Idempotent + Silent.
-# - COMPAT: Universal (Works on old Debian/Ubuntu).
+# - COMPAT: Universal.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.16"
+INSTALLER_VERSION="v17.17"
 
 # --- 0. PRE-FLIGHT: FIREWALL FLUSH ---
-# Clear everything to ensure we can reach the internet/DNS
 iptables -P INPUT ACCEPT
 iptables -P FORWARD ACCEPT
 iptables -P OUTPUT ACCEPT
@@ -23,17 +22,13 @@ iptables -F
 iptables -X
 if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
 
-# --- 0.1 HARD DNS REPAIR (The Fix for 'host not found') ---
-# If we can't resolve Google, we force Google DNS into the system configuration
+# --- 0.1 HARD DNS REPAIR ---
 if ! getent hosts google.com >/dev/null 2>&1; then
-    echo "⚠️ System DNS is broken. Forcing Google DNS (8.8.8.8) into /etc/resolv.conf..."
-    # Backup existing
+    echo "⚠️ System DNS is broken. Forcing Google DNS (8.8.8.8)..."
     cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || true
-    # Overwrite
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
     echo "nameserver 1.1.1.1" >> /etc/resolv.conf
     sleep 2
-    echo "✅ DNS patched."
 fi
 
 # --- 1. KEY LOADING ---
@@ -86,7 +81,6 @@ if command -v dpkg >/dev/null; then dpkg --configure -a || true; fi
 
 if command -v apt-get >/dev/null; then
     PM="apt-get"
-    # Try update, if DNS fails, it will fail but we patched resolv.conf above so it should work
     apt-get update -qq || true 
     install_pkg() { apt-get install -y "$@" || (sleep 5; apt-get install -y "$@"); }
     purge_pkg() { apt-get purge -y "$@"; apt-get autoremove -y; }
@@ -183,7 +177,6 @@ purge_crowdsec() {
 }
 
 configure_and_start_crowdsec() {
-    # SMART CHECK
     if systemctl is-active --quiet crowdsec; then
         local CUR_PORT=$(grep "listen_uri:" /etc/crowdsec/config.yaml | awk -F':' '{print $3}' | tr -d ' ' || echo "8080")
         if [[ "$CUR_PORT" -ge 42000 && "$CUR_PORT" -le 42100 ]]; then
@@ -314,13 +307,13 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- WRITE UPDATER WITH SYSTEM DNS FIX ---
+# --- WRITE UPDATER WITH IPV4 ENFORCEMENT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_VERSION="v11.16"
+SCRIPT_VERSION="v11.17"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
@@ -344,7 +337,7 @@ trap cleanup EXIT INT TERM
 HAS_FLOCK=0; if command -v flock >/dev/null; then HAS_FLOCK=1; fi
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
-# --- FORCE DNS REPAIR IN UPDATER TOO ---
+# FORCE DNS REPAIR
 fix_dns() {
     if ! getent hosts google.com >/dev/null 2>&1; then
         echo "nameserver 8.8.8.8" > /etc/resolv.conf
@@ -357,8 +350,8 @@ load_env_vars() { if [[ -f "\$KEYFILE" ]]; then set +u; set -a; source "\$KEYFIL
 perform_auto_update() {
     fix_dns
     local TMP_INSTALLER="/tmp/install_latest.sh"
-    # No --dns-servers flag here, because we fixed /etc/resolv.conf directly
-    if curl -sL --max-time 10 "\$REPO_URL/install.sh" -o "\$TMP_INSTALLER"; then
+    # FORCE IPV4 (-4) for GitHub too
+    if curl -sL -4 --max-time 10 "\$REPO_URL/install.sh" -o "\$TMP_INSTALLER"; then
         local NEW_UPDATER_VER=\$(grep -oE 'SCRIPT_VERSION="v[0-9]+\.[0-9]+"' "\$TMP_INSTALLER" | head -n1 | cut -d'"' -f2 || echo "")
         if [[ -n "\$NEW_UPDATER_VER" && "\$NEW_UPDATER_VER" != "\$SCRIPT_VERSION" ]]; then
             log "Update found: Installer carries \$NEW_UPDATER_VER (Local: \$SCRIPT_VERSION). Upgrading..."
@@ -396,8 +389,11 @@ download_lists() {
   local out="\$1"; shift; local srcs=("\$@"); : > "\$TMPDIR/merge.lst"
   for u in "\${srcs[@]}"; do
       local f=\$(basename "\$u" | sed "s/[^a-zA-Z0-9._-]/_/g")
-      if curl -sfL --connect-timeout 10 --retry 1 -A "$USER_AGENT" "\$u" -o "\$TMPDIR/\$f"; then
+      # IMPORTANT: -4 forces IPv4 to avoid broken IPv6 routes causing timeouts
+      if curl -sfL -4 --connect-timeout 10 --retry 1 -A "$USER_AGENT" "\$u" -o "\$TMPDIR/\$f"; then
           if [[ -s "\$TMPDIR/\$f" ]]; then smart_extract "\$TMPDIR/\$f" >> "\$TMPDIR/merge.lst" || true; echo "" >> "\$TMPDIR/merge.lst"; fi
+      else
+          log "⚠️ Failed to download: \$u"
       fi
   done
   sed -i 's/[#;].*//g' "\$TMPDIR/merge.lst"; sort -u "\$TMPDIR/merge.lst" > "\$out"
@@ -437,8 +433,6 @@ main() {
   local cnt_old_v4=\$(get_set_count "\$IPSET_BL")
   log "Processing..."
   : > "\$TMPDIR/wl_raw.lst"; local wl=(); 
-  
-  # RESCUE: LOAD COUNTRY WHITELISTS
   for c in \${WHITELIST_COUNTRIES:-}; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset"); done
   download_lists "\$TMPDIR/wl_raw.lst" "\${wl[@]}"
   
