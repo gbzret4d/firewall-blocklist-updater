@@ -1,47 +1,42 @@
 #!/bin/bash
-# INSTALLER: Strict mode (Exit on critical system errors)
+# INSTALLER: Strict mode
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.21 - FINAL STABLE) ---
-# - GUARANTEE: Keeps ESTABLISHED connections open immediately.
-# - FIX: Brutal DNS & IPv4 enforcement via Resolv.conf overwrite.
-# - FIX: Updater is totally fault-tolerant (skips bad lists, doesn't crash).
-# - FIX: Checks for empty files before restoring ipsets.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.22 - THE MISSING LINK FIX) ---
+# - FIX: Re-added the blocklist.sources generation (was missing in v17.21).
+# - FIX: Creates empty ipsets unconditionally so iptables never crashes on startup.
+# - LOGIC: Whitelist > Blocklist. IPv4 Enforced.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.21"
+INSTALLER_VERSION="v17.22"
 
-# --- 0. IMMEDIATE SAFETY NET (ANTI-LOCKOUT) ---
-# Before flushing, we allow existing connections. This protects your SSH session.
+# --- 0. IMMEDIATE SAFETY NET ---
+# Allow existing connections immediately
 iptables -P INPUT ACCEPT
 iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# Now clean up mess from previous scripts
+# Cleanup
 rm -f /var/run/firewall-updater.lock
 pkill -f update-firewall-blocklists.sh || true
 
-# Clean Firewall (Safe flush)
+# Flush (Safe)
 iptables -F
 iptables -X
 if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
 
-# Restore Safety Rule immediately after flush
+# Restore Safety Rule
 iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# --- 0.1 BRUTAL DNS FIX ---
-# If Google isn't reachable via ping, DNS is likely dead.
-if ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
-    echo "⚠️ Internet unreachable (Ping 8.8.8.8 failed). Checking routing..."
-else
-    if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
-        echo "⚠️ DNS Resolution failed. Overwriting /etc/resolv.conf..."
-        echo "nameserver 8.8.8.8" > /etc/resolv.conf
-        echo "nameserver 1.1.1.1" >> /etc/resolv.conf
-    fi
+# --- 0.1 DNS REPAIR ---
+if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
+    echo "⚠️ DNS Repair initiated..."
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    sleep 2
 fi
 
 # --- 1. CONFIG ---
@@ -53,7 +48,6 @@ fi
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-${ABUSEIPDB_API_KEY:-}}"
 CS_ENROLL="${CROWDSEC_ENROLL_KEY:-${CROWDSEC_ENROLL_KEY:-}}"
 DYNDNS="${DYNDNS_HOST:-${DYNDNS_HOST:-}}"
-# Fallback to AT if variable is missing
 WL_COUNTRIES="${WHITELIST_COUNTRIES:-${WHITELIST_COUNTRIES:-AT}}" 
 BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-${BLOCKLIST_COUNTRIES:-}}"
 TG_TOKEN="${TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
@@ -63,7 +57,6 @@ REPO_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/
 # --- HELPER FUNCTIONS ---
 get_server_identity() {
     SERVER_IP="Unknown"
-    # Use -4 to avoid IPv6 routing issues
     local INFO=$(curl -s -4 --max-time 3 http://ip-api.com/csv/?fields=query || true)
     if [[ -n "$INFO" ]]; then SERVER_IP=$(echo "$INFO" | cut -d',' -f1); fi
 }
@@ -75,17 +68,15 @@ send_msg() {
     fi
 }
 
-# --- SYSTEM PREP ---
 echo "============================================="
 echo "   FIREWALL & CROWDSEC INSTALLER ($INSTALLER_VERSION) "
 echo "============================================="
 
-# Fix broken DPKG from previous crashes
+# --- PACKAGES ---
 if command -v dpkg >/dev/null; then dpkg --configure -a || true; fi
 
 if command -v apt-get >/dev/null; then
     PM="apt-get"
-    # Force IPv4 for apt if possible, otherwise just update
     apt-get -o Acquire::ForceIPv4=true update -qq || apt-get update -qq || true
     install_pkg() { apt-get -o Acquire::ForceIPv4=true install -y "$@" || apt-get install -y "$@" || (sleep 5; apt-get install -y "$@"); }
     purge_pkg() { apt-get purge -y "$@"; apt-get autoremove -y; }
@@ -107,13 +98,11 @@ else
     systemctl enable --now chronyd 2>/dev/null || true
 fi
 
-# Cleanup Logs
 mkdir -p /etc/systemd/journald.conf.d
 echo -e "[Journal]\nSystemMaxUse=500M\nSystemMaxFileSize=100M\nMaxRetentionSec=2weeks" > /etc/systemd/journald.conf.d/00-limit-size.conf
 systemctl restart systemd-journald || true
 
-# --- CROWDSEC (Soft Fail Mode) ---
-# We wrap this in a way that if CrowdSec fails (repo issues), the firewall still installs.
+# --- CROWDSEC ---
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
 
@@ -128,13 +117,11 @@ setup_crowdsec() {
     fi
     install_pkg crowdsec-firewall-bouncer-iptables || true
     
-    # Fix Config
     mkdir -p /etc/crowdsec
     if [[ ! -s /etc/crowdsec/acquis.yaml ]]; then
         echo -e "filenames:\n  - /var/log/syslog\n  - /var/log/auth.log\n  - /var/log/messages\nlabels:\n  type: syslog\n---" > /etc/crowdsec/acquis.yaml
     fi
     
-    # Enroll
     if [[ -n "$CS_ENROLL" ]]; then 
         if [[ ! -f "/etc/crowdsec/online_api_credentials.yaml" ]]; then
             cscli console enroll "$CS_ENROLL" --overwrite || true
@@ -142,21 +129,82 @@ setup_crowdsec() {
     fi
     systemctl restart crowdsec || true
 }
-
-# Run CrowdSec setup but allow failure
-setup_crowdsec || echo "⚠️ CrowdSec setup failed, but proceeding with Firewall..."
+setup_crowdsec || echo "⚠️ CrowdSec setup failed, ignoring..."
 
 INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- WRITE UPDATER SCRIPT (FAULT TOLERANT) ---
+# --- RE-ADDED MISSING SOURCE FILE GENERATION ---
+cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
+# --- High Confidence ---
+https://www.spamhaus.org/drop/drop.txt
+https://www.spamhaus.org/drop/edrop.txt
+https://www.spamhaus.org/drop/dropv6.txt
+https://feeds.dshield.org/block.txt
+https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+https://sslbl.abuse.ch/blacklist/sslipblacklist.txt
+https://danger.rulez.sk/projects/bruteforceblocker/blist.php
+
+# --- Aggregators ---
+https://raw.githubusercontent.com/stamparm/ipsum/master/levels/5.txt
+https://blocklist.greensnow.co/greensnow.txt
+https://iplists.firehol.org/files/greensnow.ipset
+https://lists.blocklist.de/lists/all.txt
+https://www.blocklist.de/downloads/export-ips_all.txt
+
+# --- Threat Intel & Mirrors ---
+https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt
+https://rules.emergingthreats.net/blockrules/compromised-ips.txt
+https://iplists.firehol.org/files/et_compromised.ipset
+https://www.binarydefense.com/banlist.txt
+https://iplists.firehol.org/files/bds_atif.ipset
+https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/binarydefense.txt
+https://threatview.io/Downloads/IP-High-Confidence-Feed.txt
+https://dataplane.org/vncrfb.txt
+http://vxvault.net/URL_List.php
+https://view.sentinel.turris.cz/greylist-data/greylist-latest.csv
+
+# --- GitHub Lists ---
+https://github.com/borestad/blocklist-abuseipdb/raw/refs/heads/main/abuseipdb-s100-7d.ipv4
+https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/High
+https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/Extreme
+https://raw.githubusercontent.com/ShadowWhisperer/IPs/refs/heads/master/Malware/Hackers
+https://github.com/romainmarcoux/malicious-ip/raw/refs/heads/main/full-40k.txt
+https://raw.githubusercontent.com/romainmarcoux/malicious-outgoing-ip/refs/heads/main/full-outgoing-ip-40k.txt
+
+# --- IOCs & C2 ---
+https://raw.githubusercontent.com/elliotwutingfeng/ThreatFox-IOC-IPs/refs/heads/main/ips.txt
+https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/cobaltstrike_ips.txt
+https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/alienvault.txt
+https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/compromised-ips.txt
+https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/illuminate.txt
+https://feodotracker.abuse.ch/downloads/ipblocklist.csv
+https://tracker.viriback.com/last30.php
+https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt
+https://sslbl.abuse.ch/blacklist/sslbl.rpz
+https://threatview.io/Downloads/High-Confidence-CobaltStrike-C2%20-Feeds.txt
+https://urlhaus.abuse.ch/downloads/csv_recent/
+
+# --- FireHOL Collections ---
+https://cinsscore.com/list/ci-badguys.txt
+http://www.botvrij.eu/data/ioclist.ip-dst.raw
+https://iplists.firehol.org/files/cybercrime.ipset
+https://iplists.firehol.org/files/myip.ipset
+https://iplists.firehol.org/files/firehol_level1.netset
+https://iplists.firehol.org/files/sblam.ipset
+https://iplists.firehol.org/files/firehol_webclient.netset
+https://iplists.firehol.org/files/firehol_level2.netset
+https://iplists.firehol.org/files/botscout_7d.ipset
+SOURCES
+
+# --- WRITE UPDATER ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# NO set -e. We handle errors manually.
+# NO set -e
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_VERSION="v11.21"
+SCRIPT_VERSION="v11.22"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
@@ -169,7 +217,6 @@ REPO_URL="$REPO_URL"
 
 log() { echo -e "\$(date '+%Y-%m-%d %H:%M:%S') [INFO] \$*" | tee -a "\$LOGFILE"; }
 
-# 1. Lock Check
 if [ -f "\$LOCKFILE" ]; then
     if [ \$(find "\$LOCKFILE" -mmin +20) ]; then rm -f "\$LOCKFILE"; else echo "Running."; exit 0; fi
 fi
@@ -178,12 +225,10 @@ trap 'rm -f "\$LOCKFILE" /tmp/firewall-blocklists/*' EXIT
 
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
-# 2. Config & DNS
 load_env_vars() { if [[ -f "\$KEYFILE" ]]; then set -a; source "\$KEYFILE"; set +a; fi; }
 load_env_vars
 if ! getent hosts google.com >/dev/null 2>&1; then echo "nameserver 8.8.8.8" > /etc/resolv.conf; fi
 
-# 3. Auto-Update
 perform_auto_update() {
     local TMP="/tmp/install_latest.sh"
     curl -sL -4 "\$REPO_URL/install.sh" -o "\$TMP" || return 0
@@ -214,21 +259,25 @@ extract_ips() {
 
 load_ipset() {
   local file="\$1"; local setname="\$2"; local family="\$3"
-  # Skip IPv6 if system doesn't have it
   if [[ "\$family" == "inet6" ]]; then if [ ! -f /proc/net/if_inet6 ]; then return 0; fi; fi
   
-  # Safety check: Don't restore empty file
-  if [[ ! -s "\$file" ]]; then return 0; fi
-
+  # ALWAYS create set, even if empty, to prevent iptables crash
   ipset create \$setname hash:net family \$family hashsize 4096 maxelem 2000000 -exist 2>/dev/null || true
   ipset flush "\${setname}_tmp" 2>/dev/null || ipset create "\${setname}_tmp" hash:net family \$family hashsize 4096 maxelem 2000000 -exist
   
-  sed "s/^/add \${setname}_tmp /" "\$file" | ipset restore -! 2>/dev/null
+  if [[ -s "\$file" ]]; then
+      sed "s/^/add \${setname}_tmp /" "\$file" | ipset restore -! 2>/dev/null
+  fi
+  
   ipset swap "\${setname}_tmp" "\$setname"
   ipset destroy "\${setname}_tmp" 2>/dev/null || true
 }
 
 # 5. Build Lists
+# Initialize sets immediately to avoid "set does not exist" error
+ipset create \$IPSET_WL hash:net family inet hashsize 4096 maxelem 2000000 -exist 2>/dev/null || true
+ipset create \$IPSET_BL hash:net family inet hashsize 4096 maxelem 2000000 -exist 2>/dev/null || true
+
 : > "\$TMPDIR/wl_raw.lst"
 for c in \${WHITELIST_COUNTRIES:-}; do 
     curl -sfL -4 "https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset" >> "\$TMPDIR/wl_raw.lst" || true
@@ -246,7 +295,6 @@ if [[ -f "\$CONFIG_DIR/blocklist.sources" ]]; then
     while read -r line; do
         [[ "\$line" =~ ^#.*$ ]] && continue
         [[ -z "\$line" ]] && continue
-        # DOWNLOAD: Force IPv4 (-4), Retry 2, Timeout 10s. Log failures but don't exit.
         curl -sfL -4 --connect-timeout 10 --retry 2 "\$line" >> "\$TMPDIR/bl_raw.lst" || log "Skipped: \$line"
         echo "" >> "\$TMPDIR/bl_raw.lst"
     done < "\$CONFIG_DIR/blocklist.sources"
@@ -259,7 +307,6 @@ done
 extract_ips "\$TMPDIR/bl_raw.lst" "\$TMPDIR/bl.v4" "inet"
 extract_ips "\$TMPDIR/bl_raw.lst" "\$TMPDIR/bl.v6" "inet6"
 
-# Filter Whitelist
 comm -23 <(sort "\$TMPDIR/bl.v4") <(sort "\$TMPDIR/wl.v4") > "\$TMPDIR/bl_final.v4"
 comm -23 <(sort "\$TMPDIR/bl.v6") <(sort "\$TMPDIR/wl.v6") > "\$TMPDIR/bl_final.v6"
 
@@ -269,20 +316,13 @@ load_ipset "\$TMPDIR/wl.v6" "\${IPSET_WL}_v6" "inet6"
 load_ipset "\$TMPDIR/bl_final.v6" "\${IPSET_BL}_v6" "inet6"
 
 # 6. Apply Firewall
-# FIRST: Ensure established connections are preserved
 iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-
-# SECOND: Whitelist
 iptables -C INPUT -m set --match-set "\$IPSET_WL" src -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -m set --match-set "\$IPSET_WL" src -j ACCEPT
-
-# THIRD: Blocklist
 iptables -C INPUT -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || iptables -A INPUT -m set --match-set "\$IPSET_BL" src -j DROP
 
-# DNS Allow
 iptables -I INPUT 3 -p udp --sport 53 -j ACCEPT 2>/dev/null || true
 iptables -I INPUT 3 -p tcp --sport 53 -j ACCEPT 2>/dev/null || true
 
-# Docker
 if iptables -L DOCKER-USER >/dev/null 2>&1; then
     iptables -C DOCKER-USER -m set --match-set "\$IPSET_WL" src -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -m set --match-set "\$IPSET_WL" src -j ACCEPT
     iptables -C DOCKER-USER -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || iptables -A DOCKER-USER -m set --match-set "\$IPSET_BL" src -j DROP
@@ -293,7 +333,6 @@ log "Finished. Blocked IPv4: \$count"
 EOF_UPDATER
 chmod +x "$INSTALL_DIR/update-firewall-blocklists.sh"
 
-# --- SERVICE SETUP ---
 cat <<SERV > /etc/systemd/system/firewall-blocklist-updater.service
 [Unit]
 Description=Firewall Blocklist Updater
@@ -319,7 +358,6 @@ systemctl daemon-reload
 systemctl enable --now firewall-blocklist-updater.service
 systemctl enable --now firewall-blocklist-updater.timer
 
-# --- ENDLESSH (COMPATIBILITY MODE) ---
 cat <<SERV > /lib/systemd/system/endlessh.service
 [Unit]
 Description=Endlessh SSH Tarpit
@@ -336,7 +374,7 @@ SERV
 systemctl daemon-reload
 if command -v endlessh >/dev/null; then systemctl enable --now endlessh || true; fi
 
-# --- RUN & FINISH ---
+rm -f /var/run/firewall-updater.lock
 echo "🚀 Running initial update (this takes time)..."
 $INSTALL_DIR/update-firewall-blocklists.sh
 
