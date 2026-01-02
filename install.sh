@@ -2,17 +2,30 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.14 - ANTI-LOCK) ---
-# - FIX: Installer proactively removes stale lockfiles to prevent hanging.
-# - FIX: Updater uses non-blocking locks (flock -n) to fail fast instead of waiting forever.
-# - LOGIC: Whitelist Priority > Blocklist.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.15 - THE BULLDOZER) ---
+# - FIX: Flushes ALL firewall rules at start to prevent DNS blocking by old rules.
+# - FIX: Forces Google DNS (8.8.8.8) if local resolution fails.
+# - FIX: Runs 'dpkg --configure -a' to repair broken package states from previous crashes.
+# - LOGIC: Auto-Update + Idempotent + Silent.
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.14"
+INSTALLER_VERSION="v17.15"
+
+# --- 0. PRE-FLIGHT: EMERGENCY CLEANUP ---
+# If the previous run crashed leaving bad firewall rules, DNS will fail.
+# We MUST flush iptables immediately to allow downloads/installs to succeed.
+echo "🧹 Pre-flight: Flushing firewall to ensure connectivity..."
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+iptables -F
+iptables -X
+# Also flush ipset if possible to clear bad lists
+if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
 
 # --- 1. KEY LOADING & RESCUE DEFAULTS ---
 EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
@@ -23,7 +36,7 @@ fi
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-${ABUSEIPDB_API_KEY:-}}"
 CS_ENROLL="${CROWDSEC_ENROLL_KEY:-${CROWDSEC_ENROLL_KEY:-}}"
 DYNDNS="${DYNDNS_HOST:-${DYNDNS_HOST:-}}"
-WL_COUNTRIES="${WHITELIST_COUNTRIES:-${WHITELIST_COUNTRIES:-AT}}" # Fallback to AT
+WL_COUNTRIES="${WHITELIST_COUNTRIES:-${WHITELIST_COUNTRIES:-AT}}" 
 BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-${BLOCKLIST_COUNTRIES:-}}"
 TG_TOKEN="${TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
@@ -61,7 +74,15 @@ echo "============================================="
 
 if [[ $EUID -ne 0 ]]; then echo "❌ Error: Run as root."; exit 1; fi
 
-# --- OS & DEPENDENCIES ---
+# --- 1.5 DNS RESCUE ---
+# Check if DNS works. If not, force Google DNS to fix broken local resolvers.
+if ! ping -c 1 google.com >/dev/null 2>&1; then
+    echo "⚠️ DNS resolution failed. Forcing 8.8.8.8 into /etc/resolv.conf..."
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    sleep 1
+fi
+
+# --- 2. OS & DEPENDENCIES ---
 wait_for_apt() {
     local count=0
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
@@ -70,6 +91,12 @@ wait_for_apt() {
         sleep 2; count=$((count+1))
     done
 }
+
+# REPAIR BROKEN DPKG STATES FROM PREVIOUS CRASHES
+if command -v dpkg >/dev/null; then
+    echo "🔧 repairing potential dpkg errors..."
+    dpkg --configure -a || true
+fi
 
 if command -v apt-get >/dev/null; then
     PM="apt-get"
@@ -310,7 +337,7 @@ cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_VERSION="v11.14"
+SCRIPT_VERSION="v11.15"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
@@ -410,7 +437,6 @@ main() {
   [[ "\${1:-}" != "--post-update" && \$DRY_RUN -eq 0 ]] && perform_auto_update
   manage_log_size; log "=== Update Start \$SCRIPT_VERSION ==="; repair_environment
   
-  # NON-BLOCKING LOCK: If locked, exit immediately. Don't hang.
   if [[ \$HAS_FLOCK -eq 1 && \$DRY_RUN -eq 0 ]]; then exec 9>"\$LOCKFILE"; if ! flock -n 9; then echo "[ERROR] Locked (Previous job running). Exiting."; exit 1; fi; fi
   
   check_connectivity; load_env_vars
@@ -442,7 +468,12 @@ main() {
   if [[ \$DRY_RUN -eq 0 ]]; then
       iptables -D INPUT -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || true
       iptables -D INPUT -m set --match-set "\$IPSET_WL" src -j ACCEPT 2>/dev/null || true
-      iptables -I INPUT 1 -m set --match-set "\$IPSET_WL" src -j ACCEPT
+      
+      # DNS ALLOW - IMPORTANT TO AVOID LOCKOUTS
+      iptables -I INPUT 1 -p udp --sport 53 -j ACCEPT
+      iptables -I INPUT 2 -p tcp --sport 53 -j ACCEPT
+      
+      iptables -I INPUT 3 -m set --match-set "\$IPSET_WL" src -j ACCEPT
       iptables -A INPUT -m set --match-set "\$IPSET_BL" src -j DROP
       
       if iptables -L DOCKER-USER >/dev/null 2>&1; then 
