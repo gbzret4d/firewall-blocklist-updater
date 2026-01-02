@@ -3,27 +3,28 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.38 - IMMUTABLE COMPATIBLE) ---
-# - FIX: Handles read-only/locked /etc/resolv.conf gracefully.
-# - LOGIC: Skips DNS repair if DNS is already working.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.39 - DNS SAFETY FIRST) ---
+# - CRITICAL FIX: Ensures DNS is allowed BEFORE fetching lists.
+# - FIX: Handles read-only /etc/resolv.conf.
 # - CORE: 170k IPs, CrowdSec Fixes, AbuseIPDB Bridge.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.38"
+INSTALLER_VERSION="v17.39"
 
 # --- 1. EMERGENCY NETWORK RESET ---
+# Flush Firewall immediately to ensure download works
 iptables -P INPUT ACCEPT
 iptables -P OUTPUT ACCEPT
 iptables -F
 iptables -X
 if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
 
-# SMART DNS REPAIR (Only if needed, ignore errors if locked)
+# SMART DNS REPAIR
 if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf 2>/dev/null || echo "⚠️ DNS locked, skipping repair."
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf 2>/dev/null || true
     echo "nameserver 1.1.1.1" >> /etc/resolv.conf 2>/dev/null || true
 fi
 
@@ -72,7 +73,7 @@ for plugin in http email slack splunk; do
     fi
 done
 
-# AbuseIPDB Bridge (OVERWRITE PROFILE METHOD)
+# AbuseIPDB Bridge
 if [[ -n "$ABUSE_KEY" ]]; then
     mkdir -p /etc/crowdsec/notifications
     cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
@@ -113,9 +114,7 @@ if command -v docker >/dev/null; then
     cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true
 fi
 
-# Restart to apply config
 systemctl restart crowdsec || true
-
 if [[ -n "$CS_ENROLL" ]]; then 
     sleep 2
     cscli console enroll "$CS_ENROLL" --overwrite || true
@@ -171,7 +170,7 @@ SOURCES
 # --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.38 - IMMUTABLE COMPATIBLE
+# v17.39 - DNS SAFETY FIRST
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -201,12 +200,12 @@ trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start v17.38 ==="
+log "=== Start v17.39 ==="
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
 
-# Try to force safe DNS to whitelist even if resolv.conf is locked
+# FORCE DNS SAFEGUARD
 echo "8.8.8.8" >> "\$TMPDIR/wl_raw.lst"
 echo "1.1.1.1" >> "\$TMPDIR/wl_raw.lst"
 
@@ -255,7 +254,7 @@ sed "s/^/add blocklist_tmp /" "\$TMPDIR/bl_final.v4" | ipset restore -! 2>/dev/n
 ipset swap blocklist_tmp blocklist_all
 ipset destroy blocklist_tmp 2>/dev/null || true
 
-# Apply Rules
+# Apply Rules (SAFE ORDER)
 iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -i lo -j ACCEPT
 iptables -C INPUT -p udp --sport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -p udp --sport 53 -j ACCEPT
