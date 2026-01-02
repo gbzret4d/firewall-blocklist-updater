@@ -2,17 +2,17 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.11 - REFINED LISTS) ---
-# - UPDATE: Switched aggressive Ipsum L3 to high-confidence L5
-# - OPTIMIZATION: Removed redundant subset lists (L6-L8 are inside L5)
-# - LOGIC: Full Autonomy (Self-Updating, Idempotent, Silent Success)
+# --- FIREWALL & CROWDSEC INSTALLER (v17.12 - EMERGENCY WHITELIST FIX) ---
+# - FIX: Hardcoded Emergency IP 84.113.40.8 to prevent lockout
+# - FIX: Ensures Whitelist rule is inserted at POSITION 1 in iptables
+# - LOGIC: Auto-Update + Idempotent + Silent
 # - COMPAT: Universal
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.11"
+INSTALLER_VERSION="v17.12"
 
 # --- 1. KEY LOADING LOGIC ---
 EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
@@ -306,13 +306,13 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- WRITE UPDATER WITH DIRECT SCRIPT CHECK ---
+# --- WRITE UPDATER WITH EMERGENCY WHITELIST ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_VERSION="v11.11"
+SCRIPT_VERSION="v11.12"
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
 CONFIG_DIR="\$BASE_DIR/firewall-blocklists"
 KEYFILE="\${KEYFILE:-\$BASE_DIR/firewall-blocklist-keys.env}"
@@ -323,6 +323,7 @@ LOGFILE="/var/log/firewall-blocklist-updater.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024))
 DRY_RUN=0
 REPO_URL="$REPO_URL"
+EMERGENCY_IP="84.113.40.8"
 
 manage_log_size() {
     if [[ -f "\$LOGFILE" ]]; then
@@ -339,7 +340,7 @@ mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 check_ipv6_stack() { if [[ ! -f /proc/net/if_inet6 ]]; then return 1; fi; if ! command -v ip6tables >/dev/null; then return 1; fi; return 0; }
 load_env_vars() { if [[ -f "\$KEYFILE" ]]; then set +u; set -a; source "\$KEYFILE"; set +a; set -u; fi; }
 
-# --- INTELLIGENT AUTO-UPDATE (NO VERSION.TXT) ---
+# --- INTELLIGENT AUTO-UPDATE ---
 perform_auto_update() {
     local TMP_INSTALLER="/tmp/install_latest.sh"
     if curl -sL --max-time 10 "\$REPO_URL/install.sh" -o "\$TMP_INSTALLER"; then
@@ -417,6 +418,10 @@ main() {
   for c in \${WHITELIST_COUNTRIES:-}; do wl+=("https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset"); done
   download_lists "\$TMPDIR/wl_raw.lst" "\${wl[@]}"
   [[ -f "\$CUSTOM_WL_FILE" ]] && cat "\$CUSTOM_WL_FILE" >> "\$TMPDIR/wl_raw.lst"
+  
+  # --- EMERGENCY HARDCODED WHITELIST ADDITION ---
+  if [[ -n "\$EMERGENCY_IP" ]]; then echo "\$EMERGENCY_IP" >> "\$TMPDIR/wl_raw.lst"; fi
+  
   extract_ips "\$TMPDIR/wl_raw.lst" "\$TMPDIR/wl.v4" "inet"; extract_ips "\$TMPDIR/wl_raw.lst" "\$TMPDIR/wl.v6" "inet6"
 
   local bl=(); [[ -f "\$CONFIG_DIR/blocklist.sources" ]] && mapfile -t bl < <(grep -vE '^\s*#' "\$CONFIG_DIR/blocklist.sources" || true)
@@ -433,6 +438,9 @@ main() {
   load_ipset "\$TMPDIR/wl.v6" "\${IPSET_WL}_v6" "inet6"; load_ipset "\$TMPDIR/bl_final.v6" "\${IPSET_BL}_v6" "inet6"
 
   if [[ \$DRY_RUN -eq 0 ]]; then
+      # --- EMERGENCY: ACCEPT USER IP BEFORE ANY DROP RULE ---
+      iptables -C INPUT -s "\$EMERGENCY_IP" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -s "\$EMERGENCY_IP" -j ACCEPT
+      
       iptables -C INPUT -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set "\$IPSET_BL" src -j DROP
       if iptables -L DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -m set --match-set "\$IPSET_BL" src -j DROP 2>/dev/null || iptables -I DOCKER-USER -m set --match-set "\$IPSET_BL" src -j DROP; fi
       if [[ \$IPV6_ENABLED -eq 1 ]]; then command -v ip6tables >/dev/null && { ip6tables -C INPUT -m set --match-set "\${IPSET_BL}_v6" src -j DROP 2>/dev/null || ip6tables -I INPUT -m set --match-set "\${IPSET_BL}_v6" src -j DROP; }; fi
