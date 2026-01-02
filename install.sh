@@ -3,16 +3,16 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.37 - FINAL FIX) ---
-# - FIX: Replaces profiles.yaml entirely to fix YAML crash in CrowdSec.
-# - FIX: Internal version number updated to match installer.
-# - FEAT: AbuseIPDB Bridge, DNS Fix, Docker Support, 170k IPs.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.38 - IMMUTABLE COMPATIBLE) ---
+# - FIX: Handles read-only/locked /etc/resolv.conf gracefully.
+# - LOGIC: Skips DNS repair if DNS is already working.
+# - CORE: 170k IPs, CrowdSec Fixes, AbuseIPDB Bridge.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.37"
+INSTALLER_VERSION="v17.38"
 
 # --- 1. EMERGENCY NETWORK RESET ---
 iptables -P INPUT ACCEPT
@@ -20,8 +20,12 @@ iptables -P OUTPUT ACCEPT
 iptables -F
 iptables -X
 if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
-echo "nameserver 8.8.8.8" > /etc/resolv.conf
-echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
+# SMART DNS REPAIR (Only if needed, ignore errors if locked)
+if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf 2>/dev/null || echo "⚠️ DNS locked, skipping repair."
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf 2>/dev/null || true
+fi
 
 # --- 2. CLEANUP ---
 echo "🧹 Cleaning up..."
@@ -71,7 +75,6 @@ done
 # AbuseIPDB Bridge (OVERWRITE PROFILE METHOD)
 if [[ -n "$ABUSE_KEY" ]]; then
     mkdir -p /etc/crowdsec/notifications
-    # 1. Config
     cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
 type: http
 name: abuseipdb
@@ -90,7 +93,6 @@ headers:
   Accept: application/json
 YAML
 
-    # 2. Profile (Clean Rewrite to avoid YAML errors)
     mkdir -p /etc/crowdsec
     cp /etc/crowdsec/profiles.yaml /etc/crowdsec/profiles.yaml.bak 2>/dev/null || true
     cat <<PROFILE > /etc/crowdsec/profiles.yaml
@@ -169,7 +171,7 @@ SOURCES
 # --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.37 - FINAL CHECK
+# v17.38 - IMMUTABLE COMPATIBLE
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -199,10 +201,12 @@ trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start v17.37 ==="
+log "=== Start v17.38 ==="
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
+
+# Try to force safe DNS to whitelist even if resolv.conf is locked
 echo "8.8.8.8" >> "\$TMPDIR/wl_raw.lst"
 echo "1.1.1.1" >> "\$TMPDIR/wl_raw.lst"
 
