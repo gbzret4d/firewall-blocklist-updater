@@ -3,16 +3,16 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.46 - FINAL PLUGIN FIX) ---
-# - FIX: Deletes invalid plugin binaries (like 'email', 'http') causing crashes.
-# - FIX: Reinstalls config files if missing.
-# - CORE: Port 42000+, 1.1.1.1 DNS, Telegram IP+Host, 170k IPs.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.47 - STRICT INSTALL) ---
+# - FIX: Ensures basic tools (curl/gpg) exist BEFORE adding CrowdSec repo.
+# - FIX: Removed '|| true' from critical package installs to catch errors immediately.
+# - CORE: Port 42000+, 1.1.1.1 DNS, Plugin Fixes, 170k IPs.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.46"
+INSTALLER_VERSION="v17.47"
 
 # --- 1. EMERGENCY NETWORK RESET ---
 iptables -P INPUT ACCEPT
@@ -21,7 +21,7 @@ iptables -F
 iptables -X
 if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
 
-# SMART DNS REPAIR (Cloudflare)
+# SMART DNS REPAIR
 if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
     echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null || true
     echo "nameserver 1.0.0.1" >> /etc/resolv.conf 2>/dev/null || true
@@ -32,59 +32,61 @@ echo "🧹 Cleaning up..."
 systemctl stop firewall-blocklist-updater.timer firewall-blocklist-updater.service endlessh crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
 pkill -9 -f crowdsec 2>/dev/null || true
 systemctl reset-failed crowdsec 2>/dev/null || true
-
 rm -rf /usr/local/bin/update-firewall-blocklists.sh
 rm -f /var/run/firewall-updater.lock
 rm -rf /tmp/firewall-blocklists
 
-# --- 3. CONFIG & DEPS ---
-EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
-if [[ -f "$EXISTING_CONF" ]]; then set +e; source "$EXISTING_CONF"; set -e; fi
-
-ABUSE_KEY="${ABUSEIPDB_API_KEY:-${ABUSEIPDB_API_KEY:-}}"
-CS_ENROLL="${CROWDSEC_ENROLL_KEY:-${CROWDSEC_ENROLL_KEY:-}}"
-DYNDNS="${DYNDNS_HOST:-${DYNDNS_HOST:-}}"
-WL_COUNTRIES="${WHITELIST_COUNTRIES:-${WHITELIST_COUNTRIES:-AT}}" 
-BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-${BLOCKLIST_COUNTRIES:-}}"
-TG_TOKEN="${TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
-TG_CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
-REPO_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main"
-
-echo "📦 Installing Dependencies..."
+# --- 3. REPO & BASE DEPS ---
+echo "📦 Preparing Repositories..."
 if command -v apt-get >/dev/null; then
-    apt-get update -qq || true
-    # Force reinstall configs
-    apt-get install --reinstall -y -o Dpkg::Options::="--force-confmiss" \
-        curl wget ipset iptables unzip dnsutils gnupg logrotate endlessh iproute2 crowdsec crowdsec-firewall-bouncer-iptables || true
+    apt-get update -qq
+    # Install Repo-Tools FIRST
+    apt-get install -y curl gnupg ca-certificates lsb-release
+
+    # CrowdSec Repo (Only if missing)
+    if [ ! -f /etc/apt/sources.list.d/crowdsec_crowdsec.list ]; then
+        curl -s -4 https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
+    fi
+    apt-get update -qq
 elif command -v yum >/dev/null; then
-    yum install -y curl wget ipset iptables unzip bind-utils endlessh iproute crowdsec crowdsec-firewall-bouncer-iptables
+    yum install -y curl
+    curl -s -4 https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.rpm.sh | bash
 fi
 
-# --- 4. CROWDSEC SETUP ---
+# --- 4. CRITICAL INSTALL ---
+echo "📦 Installing Core Packages..."
+# NO "|| true" here! If this fails, we MUST stop.
+if command -v apt-get >/dev/null; then
+    apt-get install --reinstall -y -o Dpkg::Options::="--force-confmiss" \
+        wget ipset iptables unzip dnsutils logrotate endlessh iproute2 \
+        crowdsec crowdsec-firewall-bouncer-iptables
+elif command -v yum >/dev/null; then
+    yum install -y wget ipset iptables unzip bind-utils endlessh iproute crowdsec crowdsec-firewall-bouncer-iptables
+fi
+
+# Verify Installation
+if ! command -v cscli >/dev/null; then echo "❌ CRITICAL: cscli (CrowdSec) not found!"; exit 1; fi
+if ! command -v ipset >/dev/null; then echo "❌ CRITICAL: ipset not found!"; exit 1; fi
+
+# --- 5. CROWDSEC SETUP ---
 echo "🛡️ Setting up CrowdSec Plugins..."
 
-# --- CRITICAL PLUGIN FIX ---
-# Deletes the old files ('http', 'email') because CrowdSec crashes if they exist.
+# PLUGIN FIX
 PDIR="/usr/lib/crowdsec/plugins"
 if [[ -d "$PDIR" ]]; then
     for p in http email slack splunk; do
-        # 1. Ensure new name exists
         if [[ -f "$PDIR/$p" && ! -f "$PDIR/notification-$p" ]]; then
             cp "$PDIR/$p" "$PDIR/notification-$p"
             chmod +x "$PDIR/notification-$p"
         fi
-        # 2. DELETE OLD NAME (Fixes "plugin name invalid" crash)
-        if [[ -f "$PDIR/$p" ]]; then
-            rm -f "$PDIR/$p"
-        fi
+        if [[ -f "$PDIR/$p" ]]; then rm -f "$PDIR/$p"; fi
     done
     rm -f "$PDIR/dummy" 2>/dev/null || true
 fi
 
-# --- FORCE CROWDSEC TO PORT 42000+ & WAIT ---
+# PORT 42000+ CONFIG
 configure_crowdsec_port() {
     echo "⚙️ Configuring CrowdSec Port (Target: 42000+)..."
-    
     pkill -9 -f crowdsec 2>/dev/null || true
     
     local API_PORT=0
@@ -92,21 +94,16 @@ configure_crowdsec_port() {
         if ! ss -tuln | grep -q ":$p "; then API_PORT=$p; break; fi
     done
     
-    if [[ $API_PORT -eq 0 ]]; then 
-        echo "❌ No free port found in range 42000-42010!"; exit 1
-    fi
-    
+    if [[ $API_PORT -eq 0 ]]; then echo "❌ No free port found!"; exit 1; fi
     echo "🔧 Setting CrowdSec API to port $API_PORT..."
     
-    # Ensure config exists (reinstall should have fixed this, but safety first)
+    # Ensure config exists
     if [[ ! -f "/etc/crowdsec/config.yaml" ]]; then
-        echo "⚠️ Config missing, attempting to regenerate..."
         dpkg-reconfigure -f noninteractive crowdsec 2>/dev/null || true
     fi
 
-    # Replace ports in configs
+    # Replace ports
     sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
-    
     if [[ -f "/etc/crowdsec/local_api_credentials.yaml" ]]; then
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/local_api_credentials.yaml
     fi
@@ -114,32 +111,36 @@ configure_crowdsec_port() {
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
     fi
     
-    # Restart and WAIT
-    echo "🔄 Restarting CrowdSec..."
+    # Restart & Wait
     systemctl restart crowdsec || true
-    
     echo "⏳ Waiting for CrowdSec to bind to $API_PORT..."
     local MAX_RETRIES=30
     local COUNT=0
     while ! ss -tuln | grep -q ":$API_PORT "; do
         sleep 1
         COUNT=$((COUNT+1))
-        if [ $COUNT -ge $MAX_RETRIES ]; then
-            echo "❌ Timeout waiting for CrowdSec on port $API_PORT"
-            break
-        fi
+        if [ $COUNT -ge $MAX_RETRIES ]; then echo "❌ Timeout waiting for port $API_PORT"; break; fi
     done
     
-    # HEARTBEAT
     if curl -s "http://127.0.0.1:$API_PORT/v1/heartbeat" >/dev/null; then
         echo "✅ SUCCESS: CrowdSec API is alive on $API_PORT"
     else
-        echo "⚠️ WARNING: API Heartbeat failed. Check logs."
+        echo "⚠️ WARNING: API Heartbeat failed."
     fi
 }
 configure_crowdsec_port
 
-# AbuseIPDB Bridge
+# CONFIG: AbuseIPDB & Profiles
+EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
+if [[ -f "$EXISTING_CONF" ]]; then set +e; source "$EXISTING_CONF"; set -e; fi
+ABUSE_KEY="${ABUSEIPDB_API_KEY:-${ABUSEIPDB_API_KEY:-}}"
+CS_ENROLL="${CROWDSEC_ENROLL_KEY:-${CROWDSEC_ENROLL_KEY:-}}"
+DYNDNS="${DYNDNS_HOST:-${DYNDNS_HOST:-}}"
+WL_COUNTRIES="${WHITELIST_COUNTRIES:-${WHITELIST_COUNTRIES:-AT}}" 
+BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-${BLOCKLIST_COUNTRIES:-}}"
+TG_TOKEN="${TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
+TG_CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
+
 if [[ -n "$ABUSE_KEY" ]]; then
     mkdir -p /etc/crowdsec/notifications
     cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
@@ -159,8 +160,6 @@ headers:
   Content-Type: application/json
   Accept: application/json
 YAML
-
-    mkdir -p /etc/crowdsec
     cp /etc/crowdsec/profiles.yaml /etc/crowdsec/profiles.yaml.bak 2>/dev/null || true
     cat <<PROFILE > /etc/crowdsec/profiles.yaml
 name: default_ip_remediation
@@ -176,21 +175,17 @@ on_success: break
 PROFILE
 fi
 
-if command -v docker >/dev/null; then
-    cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true
-fi
+if command -v docker >/dev/null; then cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true; fi
 
-# Restart again
 systemctl restart crowdsec || true
 sleep 2
-
 if [[ -n "$CS_ENROLL" ]]; then 
-    echo "☁️ Enrolling to CrowdSec Console..."
+    echo "☁️ Enrolling..."
     cscli console enroll "$CS_ENROLL" --overwrite || true
 fi
 systemctl enable --now crowdsec || true
 
-# --- 5. UPDATER CONFIG ---
+# --- 6. UPDATER CONFIG ---
 INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
@@ -239,7 +234,7 @@ SOURCES
 # --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.46 - FINAL PLUGIN FIX
+# v17.47 - STRICT MODE
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -261,7 +256,6 @@ send_telegram() {
     fi 
 }
 
-# Lock Check
 if [ -f "/var/run/firewall-updater.lock" ]; then
     if [ \$(find "/var/run/firewall-updater.lock" -mmin +20) ]; then rm -f "/var/run/firewall-updater.lock"; else echo "Already Running."; exit 0; fi
 fi
@@ -269,14 +263,11 @@ touch "/var/run/firewall-updater.lock"
 trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
-
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start v17.46 ==="
+log "=== Start v17.47 ==="
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
-
-# FORCE DNS SAFEGUARD (Cloudflare)
 echo "1.1.1.1" >> "\$TMPDIR/wl_raw.lst"
 echo "1.0.0.1" >> "\$TMPDIR/wl_raw.lst"
 
