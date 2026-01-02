@@ -3,16 +3,16 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.49 - DYNAMIC HYGIENE) ---
-# - FEAT: Journal log limit is now calculated based on TOTAL DISK SIZE.
-# - <10GB=50MB, <20GB=150MB, <50GB=300MB, >50GB=500MB.
-# - CORE: Port 42000+, 1.1.1.1 DNS, All Crash Fixes, Strict Install.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.50 - GOLD MASTER) ---
+# - FEAT: Includes Dynamic Disk Hygiene (Logs & Cache).
+# - FIX: All crash fixes (Zombie Killer, Plugin Names, Config Repair).
+# - CORE: Port 42000+, 1.1.1.1 DNS, Telegram IP+Host, 170k IPs.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.49"
+INSTALLER_VERSION="v17.50"
 
 # --- 1. EMERGENCY NETWORK RESET ---
 iptables -P INPUT ACCEPT
@@ -178,7 +178,7 @@ if [[ -n "$CS_ENROLL" ]]; then
 fi
 systemctl enable --now crowdsec || true
 
-# --- 6. UPDATER CONFIG ---
+# --- 6. UPDATER CONFIG (THE GENERATOR) ---
 INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
@@ -223,9 +223,10 @@ https://iplists.firehol.org/files/firehol_level2.netset
 https://iplists.firehol.org/files/botscout_7d.ipset
 SOURCES
 
+# THIS SECTION WRITES THE UPDATER SCRIPT TO DISK
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.49 - DYNAMIC HYGIENE & FULL FIXES
+# v17.50 - DYNAMIC HYGIENE & FULL FIXES
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -247,17 +248,18 @@ send_telegram() {
     fi 
 }
 
-# --- DYNAMIC MAINTENANCE ---
+# --- DYNAMIC MAINTENANCE (CLEAN LOGS & CACHE) ---
 run_maintenance() {
-    # 1. Clean Apt
+    # 1. Clean Apt Cache
     if command -v apt-get >/dev/null; then apt-get clean >/dev/null 2>&1 || true; fi
     
     # 2. Dynamic Journal Vacuum based on Total Root Disk Size
     if command -v journalctl >/dev/null; then
-        # Get total size of / in GB (integer)
+        # Get total size of / in GB
         local ROOT_SIZE=\$(df -BG / | tail -1 | awk '{print \$2}' | tr -d 'G')
-        local VAC_SIZE="200M" # Fallback
+        local VAC_SIZE="200M"
 
+        # Calculate limit
         if [[ "\$ROOT_SIZE" -lt 10 ]]; then
             VAC_SIZE="50M"
         elif [[ "\$ROOT_SIZE" -lt 20 ]]; then
@@ -281,9 +283,9 @@ trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start v17.49 ==="
+log "=== Start v17.50 ==="
 
-# Run Maintenance
+# Execute Disk Hygiene
 run_maintenance
 
 # 1. Whitelist
