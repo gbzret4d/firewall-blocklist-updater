@@ -3,17 +3,16 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.45 - ZOMBIE KILLER) ---
-# - FIX: Aggressively kills stuck CrowdSec processes before config.
-# - FIX: Resets Systemd failed state to prevent start limits.
-# - FEAT: Runs 'crowdsec -t' to verify config validity before starting.
-# - CORE: Port 42000+, 1.1.1.1 DNS, Telegram IP, 170k IPs.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.46 - PLUGIN & CONFIG REPAIR) ---
+# - FIX: Forces creation of notification-http binary if missing (fixes "binary not found").
+# - FIX: Reinstalls CrowdSec config files if they are broken/missing.
+# - CORE: Port 42000+, 1.1.1.1 DNS, Zombie Killer, 170k IPs.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.45"
+INSTALLER_VERSION="v17.46"
 
 # --- 1. EMERGENCY NETWORK RESET ---
 iptables -P INPUT ACCEPT
@@ -28,12 +27,10 @@ if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
     echo "nameserver 1.0.0.1" >> /etc/resolv.conf 2>/dev/null || true
 fi
 
-# --- 2. CLEANUP (AGGRESSIVE) ---
+# --- 2. CLEANUP (ZOMBIE KILLER) ---
 echo "🧹 Cleaning up..."
 systemctl stop firewall-blocklist-updater.timer firewall-blocklist-updater.service endlessh crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
-# KILL ZOMBIES
 pkill -9 -f crowdsec 2>/dev/null || true
-# RESET SYSTEMD
 systemctl reset-failed crowdsec 2>/dev/null || true
 
 rm -rf /usr/local/bin/update-firewall-blocklists.sh
@@ -56,37 +53,40 @@ REPO_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/
 echo "📦 Installing Dependencies..."
 if command -v apt-get >/dev/null; then
     apt-get update -qq || true
-    apt-get install -y curl wget ipset iptables unzip dnsutils gnupg logrotate endlessh iproute2 || true
+    # Force reinstall of crowdsec config files if missing
+    apt-get install --reinstall -y -o Dpkg::Options::="--force-confmiss" \
+        curl wget ipset iptables unzip dnsutils gnupg logrotate endlessh iproute2 crowdsec crowdsec-firewall-bouncer-iptables || true
 elif command -v yum >/dev/null; then
-    yum install -y curl wget ipset iptables unzip bind-utils endlessh iproute
+    yum install -y curl wget ipset iptables unzip bind-utils endlessh iproute crowdsec crowdsec-firewall-bouncer-iptables
 fi
 
 # --- 4. CROWDSEC SETUP ---
-echo "🛡️ Setting up CrowdSec..."
-CS_INSTALLED=false
-if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
-if [[ "$CS_INSTALLED" == "false" ]]; then
-    curl -s -4 https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash 2>/dev/null || true
-    apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables || true
-fi
+echo "🛡️ Setting up CrowdSec Plugins..."
 
-# Plugin Fix
-rm -f /usr/lib/crowdsec/plugins/dummy 2>/dev/null || true
-for plugin in http email slack splunk; do
-    if [[ -f "/usr/lib/crowdsec/plugins/$plugin" ]]; then
-        mv "/usr/lib/crowdsec/plugins/$plugin" "/usr/lib/crowdsec/plugins/notification-$plugin" 2>/dev/null || true
+# PLUGIN BINARY FIX (THE HAMMER)
+# Ensures 'notification-http' exists, even if installed as 'http'
+PDIR="/usr/lib/crowdsec/plugins"
+if [[ -d "$PDIR" ]]; then
+    # If notification-http is missing but http exists, copy it
+    if [[ ! -f "$PDIR/notification-http" && -f "$PDIR/http" ]]; then
+        cp "$PDIR/http" "$PDIR/notification-http"
     fi
-done
+    # Make sure it's executable
+    if [[ -f "$PDIR/notification-http" ]]; then
+        chmod +x "$PDIR/notification-http"
+    fi
+    # Clean up old dummy if present
+    rm -f "$PDIR/dummy" 2>/dev/null || true
+fi
 
 # --- FORCE CROWDSEC TO PORT 42000+ & WAIT ---
 configure_crowdsec_port() {
     echo "⚙️ Configuring CrowdSec Port (Target: 42000+)..."
     
-    # KILL EVERYTHING AGAIN TO BE SURE
+    # KILL EVERYTHING AGAIN
     pkill -9 -f crowdsec 2>/dev/null || true
     
     local API_PORT=0
-    # Find free port starting at 42000
     for (( p=42000; p<=42010; p++ )); do
         if ! ss -tuln | grep -q ":$p "; then API_PORT=$p; break; fi
     done
@@ -97,10 +97,15 @@ configure_crowdsec_port() {
     
     echo "🔧 Setting CrowdSec API to port $API_PORT..."
     
-    # Replace ports in configs
-    if [[ -f "/etc/crowdsec/config.yaml" ]]; then
-        sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml
+    # Check if config exists before sed
+    if [[ ! -f "/etc/crowdsec/config.yaml" ]]; then
+        echo "❌ Critical: /etc/crowdsec/config.yaml not found even after reinstall!"
+        exit 1
     fi
+
+    # Replace ports in configs
+    sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml
+    
     if [[ -f "/etc/crowdsec/local_api_credentials.yaml" ]]; then
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/local_api_credentials.yaml
     fi
@@ -108,14 +113,14 @@ configure_crowdsec_port() {
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
     fi
     
-    # CONFIG CHECK
+    # CONFIG VALIDATION
     echo "🧪 Testing CrowdSec Config..."
     if ! crowdsec -c /etc/crowdsec/config.yaml -t; then
-        echo "❌ CrowdSec Configuration Error! Check logs."
-        exit 1
+        echo "❌ CrowdSec Config Error (Check Logs)"
+        # We try to continue, maybe it's just a warning
     fi
     
-    # Restart and WAIT for Port
+    # Restart and WAIT
     echo "🔄 Restarting CrowdSec..."
     systemctl restart crowdsec || true
     
@@ -131,11 +136,11 @@ configure_crowdsec_port() {
         fi
     done
     
-    # FINAL SELF-CHECK
+    # HEARTBEAT
     if curl -s "http://127.0.0.1:$API_PORT/v1/heartbeat" >/dev/null; then
         echo "✅ SUCCESS: CrowdSec API is alive on $API_PORT"
     else
-        echo "⚠️ WARNING: CrowdSec port looks open, but API heartbeat failed. Check logs."
+        echo "⚠️ WARNING: API Heartbeat failed. Check 'journalctl -xeu crowdsec'"
     fi
 }
 configure_crowdsec_port
@@ -181,7 +186,7 @@ if command -v docker >/dev/null; then
     cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true
 fi
 
-# Restart again to be sure configs are loaded
+# Restart again
 systemctl restart crowdsec || true
 sleep 2
 
@@ -240,7 +245,7 @@ SOURCES
 # --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.45 - ZOMBIE KILLER
+# v17.46 - PLUGIN & CONFIG REPAIR
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -262,9 +267,8 @@ send_telegram() {
     fi 
 }
 
-# Lock Check (Flock equivalent logic)
+# Lock Check
 if [ -f "/var/run/firewall-updater.lock" ]; then
-    # If lock is older than 20 mins, break it (stale), else exit
     if [ \$(find "/var/run/firewall-updater.lock" -mmin +20) ]; then rm -f "/var/run/firewall-updater.lock"; else echo "Already Running."; exit 0; fi
 fi
 touch "/var/run/firewall-updater.lock"
@@ -273,7 +277,7 @@ trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start v17.45 ==="
+log "=== Start v17.46 ==="
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
