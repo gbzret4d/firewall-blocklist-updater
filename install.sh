@@ -3,17 +3,17 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.44 - PRODUCTION FINAL) ---
-# - FEAT: Forces Port 42000+ for CrowdSec.
-# - FIX: Installs 'iproute2' to ensure 'ss' command exists for port checks.
-# - FIX: Performs a local API heartbeat check to verify success.
-# - CORE: 1.1.1.1 DNS, Telegram (IP+Host), 170k List, Docker, AbuseIPDB.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.45 - ZOMBIE KILLER) ---
+# - FIX: Aggressively kills stuck CrowdSec processes before config.
+# - FIX: Resets Systemd failed state to prevent start limits.
+# - FEAT: Runs 'crowdsec -t' to verify config validity before starting.
+# - CORE: Port 42000+, 1.1.1.1 DNS, Telegram IP, 170k IPs.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.44"
+INSTALLER_VERSION="v17.45"
 
 # --- 1. EMERGENCY NETWORK RESET ---
 iptables -P INPUT ACCEPT
@@ -28,9 +28,14 @@ if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
     echo "nameserver 1.0.0.1" >> /etc/resolv.conf 2>/dev/null || true
 fi
 
-# --- 2. CLEANUP ---
+# --- 2. CLEANUP (AGGRESSIVE) ---
 echo "🧹 Cleaning up..."
 systemctl stop firewall-blocklist-updater.timer firewall-blocklist-updater.service endlessh crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
+# KILL ZOMBIES
+pkill -9 -f crowdsec 2>/dev/null || true
+# RESET SYSTEMD
+systemctl reset-failed crowdsec 2>/dev/null || true
+
 rm -rf /usr/local/bin/update-firewall-blocklists.sh
 rm -f /var/run/firewall-updater.lock
 rm -rf /tmp/firewall-blocklists
@@ -51,7 +56,6 @@ REPO_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/
 echo "📦 Installing Dependencies..."
 if command -v apt-get >/dev/null; then
     apt-get update -qq || true
-    # Added iproute2 for 'ss' command
     apt-get install -y curl wget ipset iptables unzip dnsutils gnupg logrotate endlessh iproute2 || true
 elif command -v yum >/dev/null; then
     yum install -y curl wget ipset iptables unzip bind-utils endlessh iproute
@@ -77,8 +81,12 @@ done
 # --- FORCE CROWDSEC TO PORT 42000+ & WAIT ---
 configure_crowdsec_port() {
     echo "⚙️ Configuring CrowdSec Port (Target: 42000+)..."
+    
+    # KILL EVERYTHING AGAIN TO BE SURE
+    pkill -9 -f crowdsec 2>/dev/null || true
+    
     local API_PORT=0
-    # Find free port starting at 42000 using ss (iproute2)
+    # Find free port starting at 42000
     for (( p=42000; p<=42010; p++ )); do
         if ! ss -tuln | grep -q ":$p "; then API_PORT=$p; break; fi
     done
@@ -100,6 +108,13 @@ configure_crowdsec_port() {
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
     fi
     
+    # CONFIG CHECK
+    echo "🧪 Testing CrowdSec Config..."
+    if ! crowdsec -c /etc/crowdsec/config.yaml -t; then
+        echo "❌ CrowdSec Configuration Error! Check logs."
+        exit 1
+    fi
+    
     # Restart and WAIT for Port
     echo "🔄 Restarting CrowdSec..."
     systemctl restart crowdsec || true
@@ -112,7 +127,6 @@ configure_crowdsec_port() {
         COUNT=$((COUNT+1))
         if [ $COUNT -ge $MAX_RETRIES ]; then
             echo "❌ Timeout waiting for CrowdSec on port $API_PORT"
-            # Try once more loosely but don't exit, might be slow
             break
         fi
     done
@@ -226,7 +240,7 @@ SOURCES
 # --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.44 - PRODUCTION FINAL
+# v17.45 - ZOMBIE KILLER
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -259,7 +273,7 @@ trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start v17.44 ==="
+log "=== Start v17.45 ==="
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
