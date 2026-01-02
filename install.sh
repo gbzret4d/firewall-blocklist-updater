@@ -3,16 +3,16 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.47 - STRICT INSTALL) ---
-# - FIX: Ensures basic tools (curl/gpg) exist BEFORE adding CrowdSec repo.
-# - FIX: Removed '|| true' from critical package installs to catch errors immediately.
-# - CORE: Port 42000+, 1.1.1.1 DNS, Plugin Fixes, 170k IPs.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.49 - DYNAMIC HYGIENE) ---
+# - FEAT: Journal log limit is now calculated based on TOTAL DISK SIZE.
+# - <10GB=50MB, <20GB=150MB, <50GB=300MB, >50GB=500MB.
+# - CORE: Port 42000+, 1.1.1.1 DNS, All Crash Fixes, Strict Install.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.47"
+INSTALLER_VERSION="v17.49"
 
 # --- 1. EMERGENCY NETWORK RESET ---
 iptables -P INPUT ACCEPT
@@ -40,10 +40,7 @@ rm -rf /tmp/firewall-blocklists
 echo "📦 Preparing Repositories..."
 if command -v apt-get >/dev/null; then
     apt-get update -qq
-    # Install Repo-Tools FIRST
     apt-get install -y curl gnupg ca-certificates lsb-release
-
-    # CrowdSec Repo (Only if missing)
     if [ ! -f /etc/apt/sources.list.d/crowdsec_crowdsec.list ]; then
         curl -s -4 https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
     fi
@@ -55,7 +52,6 @@ fi
 
 # --- 4. CRITICAL INSTALL ---
 echo "📦 Installing Core Packages..."
-# NO "|| true" here! If this fails, we MUST stop.
 if command -v apt-get >/dev/null; then
     apt-get install --reinstall -y -o Dpkg::Options::="--force-confmiss" \
         wget ipset iptables unzip dnsutils logrotate endlessh iproute2 \
@@ -64,14 +60,15 @@ elif command -v yum >/dev/null; then
     yum install -y wget ipset iptables unzip bind-utils endlessh iproute crowdsec crowdsec-firewall-bouncer-iptables
 fi
 
-# Verify Installation
-if ! command -v cscli >/dev/null; then echo "❌ CRITICAL: cscli (CrowdSec) not found!"; exit 1; fi
+if ! command -v cscli >/dev/null; then echo "❌ CRITICAL: cscli not found!"; exit 1; fi
 if ! command -v ipset >/dev/null; then echo "❌ CRITICAL: ipset not found!"; exit 1; fi
+
+# Explicitly enable logrotate timer
+systemctl enable --now logrotate.timer || true
 
 # --- 5. CROWDSEC SETUP ---
 echo "🛡️ Setting up CrowdSec Plugins..."
 
-# PLUGIN FIX
 PDIR="/usr/lib/crowdsec/plugins"
 if [[ -d "$PDIR" ]]; then
     for p in http email slack splunk; do
@@ -84,7 +81,6 @@ if [[ -d "$PDIR" ]]; then
     rm -f "$PDIR/dummy" 2>/dev/null || true
 fi
 
-# PORT 42000+ CONFIG
 configure_crowdsec_port() {
     echo "⚙️ Configuring CrowdSec Port (Target: 42000+)..."
     pkill -9 -f crowdsec 2>/dev/null || true
@@ -97,13 +93,12 @@ configure_crowdsec_port() {
     if [[ $API_PORT -eq 0 ]]; then echo "❌ No free port found!"; exit 1; fi
     echo "🔧 Setting CrowdSec API to port $API_PORT..."
     
-    # Ensure config exists
     if [[ ! -f "/etc/crowdsec/config.yaml" ]]; then
         dpkg-reconfigure -f noninteractive crowdsec 2>/dev/null || true
     fi
 
-    # Replace ports
     sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
+    
     if [[ -f "/etc/crowdsec/local_api_credentials.yaml" ]]; then
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/local_api_credentials.yaml
     fi
@@ -111,7 +106,6 @@ configure_crowdsec_port() {
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
     fi
     
-    # Restart & Wait
     systemctl restart crowdsec || true
     echo "⏳ Waiting for CrowdSec to bind to $API_PORT..."
     local MAX_RETRIES=30
@@ -130,7 +124,6 @@ configure_crowdsec_port() {
 }
 configure_crowdsec_port
 
-# CONFIG: AbuseIPDB & Profiles
 EXISTING_CONF="/usr/local/etc/firewall-blocklist-updater/firewall-blocklist-keys.env"
 if [[ -f "$EXISTING_CONF" ]]; then set +e; source "$EXISTING_CONF"; set -e; fi
 ABUSE_KEY="${ABUSEIPDB_API_KEY:-${ABUSEIPDB_API_KEY:-}}"
@@ -190,7 +183,6 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- SOURCES ---
 cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 https://www.spamhaus.org/drop/drop.txt
 https://www.spamhaus.org/drop/edrop.txt
@@ -231,10 +223,9 @@ https://iplists.firehol.org/files/firehol_level2.netset
 https://iplists.firehol.org/files/botscout_7d.ipset
 SOURCES
 
-# --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.47 - STRICT MODE
+# v17.49 - DYNAMIC HYGIENE & FULL FIXES
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -256,6 +247,32 @@ send_telegram() {
     fi 
 }
 
+# --- DYNAMIC MAINTENANCE ---
+run_maintenance() {
+    # 1. Clean Apt
+    if command -v apt-get >/dev/null; then apt-get clean >/dev/null 2>&1 || true; fi
+    
+    # 2. Dynamic Journal Vacuum based on Total Root Disk Size
+    if command -v journalctl >/dev/null; then
+        # Get total size of / in GB (integer)
+        local ROOT_SIZE=\$(df -BG / | tail -1 | awk '{print \$2}' | tr -d 'G')
+        local VAC_SIZE="200M" # Fallback
+
+        if [[ "\$ROOT_SIZE" -lt 10 ]]; then
+            VAC_SIZE="50M"
+        elif [[ "\$ROOT_SIZE" -lt 20 ]]; then
+            VAC_SIZE="150M"
+        elif [[ "\$ROOT_SIZE" -lt 50 ]]; then
+            VAC_SIZE="300M"
+        else
+            VAC_SIZE="500M"
+        fi
+        
+        # Run Vacuum
+        journalctl --vacuum-size=\$VAC_SIZE >/dev/null 2>&1 || true
+    fi
+}
+
 if [ -f "/var/run/firewall-updater.lock" ]; then
     if [ \$(find "/var/run/firewall-updater.lock" -mmin +20) ]; then rm -f "/var/run/firewall-updater.lock"; else echo "Already Running."; exit 0; fi
 fi
@@ -264,7 +281,10 @@ trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start v17.47 ==="
+log "=== Start v17.49 ==="
+
+# Run Maintenance
+run_maintenance
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
