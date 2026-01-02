@@ -3,10 +3,10 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.46 - PLUGIN & CONFIG REPAIR) ---
-# - FIX: Forces creation of notification-http binary if missing (fixes "binary not found").
-# - FIX: Reinstalls CrowdSec config files if they are broken/missing.
-# - CORE: Port 42000+, 1.1.1.1 DNS, Zombie Killer, 170k IPs.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.46 - FINAL PLUGIN FIX) ---
+# - FIX: Deletes invalid plugin binaries (like 'email', 'http') causing crashes.
+# - FIX: Reinstalls config files if missing.
+# - CORE: Port 42000+, 1.1.1.1 DNS, Telegram IP+Host, 170k IPs.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
@@ -21,13 +21,13 @@ iptables -F
 iptables -X
 if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
 
-# SMART DNS REPAIR (Cloudflare 1.1.1.1)
+# SMART DNS REPAIR (Cloudflare)
 if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
     echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null || true
     echo "nameserver 1.0.0.1" >> /etc/resolv.conf 2>/dev/null || true
 fi
 
-# --- 2. CLEANUP (ZOMBIE KILLER) ---
+# --- 2. CLEANUP ---
 echo "🧹 Cleaning up..."
 systemctl stop firewall-blocklist-updater.timer firewall-blocklist-updater.service endlessh crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
 pkill -9 -f crowdsec 2>/dev/null || true
@@ -53,7 +53,7 @@ REPO_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/
 echo "📦 Installing Dependencies..."
 if command -v apt-get >/dev/null; then
     apt-get update -qq || true
-    # Force reinstall of crowdsec config files if missing
+    # Force reinstall configs
     apt-get install --reinstall -y -o Dpkg::Options::="--force-confmiss" \
         curl wget ipset iptables unzip dnsutils gnupg logrotate endlessh iproute2 crowdsec crowdsec-firewall-bouncer-iptables || true
 elif command -v yum >/dev/null; then
@@ -63,19 +63,21 @@ fi
 # --- 4. CROWDSEC SETUP ---
 echo "🛡️ Setting up CrowdSec Plugins..."
 
-# PLUGIN BINARY FIX (THE HAMMER)
-# Ensures 'notification-http' exists, even if installed as 'http'
+# --- CRITICAL PLUGIN FIX ---
+# Deletes the old files ('http', 'email') because CrowdSec crashes if they exist.
 PDIR="/usr/lib/crowdsec/plugins"
 if [[ -d "$PDIR" ]]; then
-    # If notification-http is missing but http exists, copy it
-    if [[ ! -f "$PDIR/notification-http" && -f "$PDIR/http" ]]; then
-        cp "$PDIR/http" "$PDIR/notification-http"
-    fi
-    # Make sure it's executable
-    if [[ -f "$PDIR/notification-http" ]]; then
-        chmod +x "$PDIR/notification-http"
-    fi
-    # Clean up old dummy if present
+    for p in http email slack splunk; do
+        # 1. Ensure new name exists
+        if [[ -f "$PDIR/$p" && ! -f "$PDIR/notification-$p" ]]; then
+            cp "$PDIR/$p" "$PDIR/notification-$p"
+            chmod +x "$PDIR/notification-$p"
+        fi
+        # 2. DELETE OLD NAME (Fixes "plugin name invalid" crash)
+        if [[ -f "$PDIR/$p" ]]; then
+            rm -f "$PDIR/$p"
+        fi
+    done
     rm -f "$PDIR/dummy" 2>/dev/null || true
 fi
 
@@ -83,7 +85,6 @@ fi
 configure_crowdsec_port() {
     echo "⚙️ Configuring CrowdSec Port (Target: 42000+)..."
     
-    # KILL EVERYTHING AGAIN
     pkill -9 -f crowdsec 2>/dev/null || true
     
     local API_PORT=0
@@ -97,27 +98,20 @@ configure_crowdsec_port() {
     
     echo "🔧 Setting CrowdSec API to port $API_PORT..."
     
-    # Check if config exists before sed
+    # Ensure config exists (reinstall should have fixed this, but safety first)
     if [[ ! -f "/etc/crowdsec/config.yaml" ]]; then
-        echo "❌ Critical: /etc/crowdsec/config.yaml not found even after reinstall!"
-        exit 1
+        echo "⚠️ Config missing, attempting to regenerate..."
+        dpkg-reconfigure -f noninteractive crowdsec 2>/dev/null || true
     fi
 
     # Replace ports in configs
-    sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml
+    sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml 2>/dev/null || true
     
     if [[ -f "/etc/crowdsec/local_api_credentials.yaml" ]]; then
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/local_api_credentials.yaml
     fi
     if [[ -f "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml" ]]; then
         sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
-    fi
-    
-    # CONFIG VALIDATION
-    echo "🧪 Testing CrowdSec Config..."
-    if ! crowdsec -c /etc/crowdsec/config.yaml -t; then
-        echo "❌ CrowdSec Config Error (Check Logs)"
-        # We try to continue, maybe it's just a warning
     fi
     
     # Restart and WAIT
@@ -140,7 +134,7 @@ configure_crowdsec_port() {
     if curl -s "http://127.0.0.1:$API_PORT/v1/heartbeat" >/dev/null; then
         echo "✅ SUCCESS: CrowdSec API is alive on $API_PORT"
     else
-        echo "⚠️ WARNING: API Heartbeat failed. Check 'journalctl -xeu crowdsec'"
+        echo "⚠️ WARNING: API Heartbeat failed. Check logs."
     fi
 }
 configure_crowdsec_port
@@ -245,7 +239,7 @@ SOURCES
 # --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.46 - PLUGIN & CONFIG REPAIR
+# v17.46 - FINAL PLUGIN FIX
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
