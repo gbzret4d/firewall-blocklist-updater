@@ -3,29 +3,29 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.39 - DNS SAFETY FIRST) ---
-# - CRITICAL FIX: Ensures DNS is allowed BEFORE fetching lists.
-# - FIX: Handles read-only /etc/resolv.conf.
-# - CORE: 170k IPs, CrowdSec Fixes, AbuseIPDB Bridge.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.44 - PRODUCTION FINAL) ---
+# - FEAT: Forces Port 42000+ for CrowdSec.
+# - FIX: Installs 'iproute2' to ensure 'ss' command exists for port checks.
+# - FIX: Performs a local API heartbeat check to verify success.
+# - CORE: 1.1.1.1 DNS, Telegram (IP+Host), 170k List, Docker, AbuseIPDB.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.39"
+INSTALLER_VERSION="v17.44"
 
 # --- 1. EMERGENCY NETWORK RESET ---
-# Flush Firewall immediately to ensure download works
 iptables -P INPUT ACCEPT
 iptables -P OUTPUT ACCEPT
 iptables -F
 iptables -X
 if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
 
-# SMART DNS REPAIR
+# SMART DNS REPAIR (Cloudflare 1.1.1.1)
 if ! ping -c 1 -W 2 google.com >/dev/null 2>&1; then
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf 2>/dev/null || true
-    echo "nameserver 1.1.1.1" >> /etc/resolv.conf 2>/dev/null || true
+    echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null || true
+    echo "nameserver 1.0.0.1" >> /etc/resolv.conf 2>/dev/null || true
 fi
 
 # --- 2. CLEANUP ---
@@ -51,12 +51,13 @@ REPO_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/
 echo "📦 Installing Dependencies..."
 if command -v apt-get >/dev/null; then
     apt-get update -qq || true
-    apt-get install -y curl wget ipset iptables unzip dnsutils gnupg logrotate endlessh || true
+    # Added iproute2 for 'ss' command
+    apt-get install -y curl wget ipset iptables unzip dnsutils gnupg logrotate endlessh iproute2 || true
 elif command -v yum >/dev/null; then
-    yum install -y curl wget ipset iptables unzip bind-utils endlessh
+    yum install -y curl wget ipset iptables unzip bind-utils endlessh iproute
 fi
 
-# --- 4. CROWDSEC ---
+# --- 4. CROWDSEC SETUP ---
 echo "🛡️ Setting up CrowdSec..."
 CS_INSTALLED=false
 if command -v crowdsec >/dev/null; then CS_INSTALLED=true; fi
@@ -72,6 +73,58 @@ for plugin in http email slack splunk; do
         mv "/usr/lib/crowdsec/plugins/$plugin" "/usr/lib/crowdsec/plugins/notification-$plugin" 2>/dev/null || true
     fi
 done
+
+# --- FORCE CROWDSEC TO PORT 42000+ & WAIT ---
+configure_crowdsec_port() {
+    echo "⚙️ Configuring CrowdSec Port (Target: 42000+)..."
+    local API_PORT=0
+    # Find free port starting at 42000 using ss (iproute2)
+    for (( p=42000; p<=42010; p++ )); do
+        if ! ss -tuln | grep -q ":$p "; then API_PORT=$p; break; fi
+    done
+    
+    if [[ $API_PORT -eq 0 ]]; then 
+        echo "❌ No free port found in range 42000-42010!"; exit 1
+    fi
+    
+    echo "🔧 Setting CrowdSec API to port $API_PORT..."
+    
+    # Replace ports in configs
+    if [[ -f "/etc/crowdsec/config.yaml" ]]; then
+        sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/config.yaml
+    fi
+    if [[ -f "/etc/crowdsec/local_api_credentials.yaml" ]]; then
+        sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/local_api_credentials.yaml
+    fi
+    if [[ -f "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml" ]]; then
+        sed -i "s/127.0.0.1:[0-9]\{4,5\}/127.0.0.1:$API_PORT/g" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+    fi
+    
+    # Restart and WAIT for Port
+    echo "🔄 Restarting CrowdSec..."
+    systemctl restart crowdsec || true
+    
+    echo "⏳ Waiting for CrowdSec to bind to $API_PORT..."
+    local MAX_RETRIES=30
+    local COUNT=0
+    while ! ss -tuln | grep -q ":$API_PORT "; do
+        sleep 1
+        COUNT=$((COUNT+1))
+        if [ $COUNT -ge $MAX_RETRIES ]; then
+            echo "❌ Timeout waiting for CrowdSec on port $API_PORT"
+            # Try once more loosely but don't exit, might be slow
+            break
+        fi
+    done
+    
+    # FINAL SELF-CHECK
+    if curl -s "http://127.0.0.1:$API_PORT/v1/heartbeat" >/dev/null; then
+        echo "✅ SUCCESS: CrowdSec API is alive on $API_PORT"
+    else
+        echo "⚠️ WARNING: CrowdSec port looks open, but API heartbeat failed. Check logs."
+    fi
+}
+configure_crowdsec_port
 
 # AbuseIPDB Bridge
 if [[ -n "$ABUSE_KEY" ]]; then
@@ -114,9 +167,12 @@ if command -v docker >/dev/null; then
     cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true
 fi
 
+# Restart again to be sure configs are loaded
 systemctl restart crowdsec || true
+sleep 2
+
 if [[ -n "$CS_ENROLL" ]]; then 
-    sleep 2
+    echo "☁️ Enrolling to CrowdSec Console..."
     cscli console enroll "$CS_ENROLL" --overwrite || true
 fi
 systemctl enable --now crowdsec || true
@@ -170,7 +226,7 @@ SOURCES
 # --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.39 - DNS SAFETY FIRST
+# v17.44 - PRODUCTION FINAL
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -185,13 +241,16 @@ load_env_vars
 
 send_telegram() { 
     if [[ -n "\${TELEGRAM_BOT_TOKEN:-}" && -n "\${TELEGRAM_CHAT_ID:-}" ]]; then 
-        local MSG="<b>[\$(hostname)]</b> \$1"
+        local HN=\$(hostname)
+        local IP=\$(curl -s -4 --max-time 2 http://ip-api.com/csv/?fields=query || echo "Unknown")
+        local MSG="<b>[\$HN] (\$IP)</b>%0A\$1"
         curl -s -4 -X POST "https://api.telegram.org/bot\$TELEGRAM_BOT_TOKEN/sendMessage" -d chat_id="\$TELEGRAM_CHAT_ID" -d text="\$MSG" -d parse_mode="HTML" >/dev/null || true
     fi 
 }
 
-# Lock Check
+# Lock Check (Flock equivalent logic)
 if [ -f "/var/run/firewall-updater.lock" ]; then
+    # If lock is older than 20 mins, break it (stale), else exit
     if [ \$(find "/var/run/firewall-updater.lock" -mmin +20) ]; then rm -f "/var/run/firewall-updater.lock"; else echo "Already Running."; exit 0; fi
 fi
 touch "/var/run/firewall-updater.lock"
@@ -200,14 +259,14 @@ trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start v17.39 ==="
+log "=== Start v17.44 ==="
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
 
-# FORCE DNS SAFEGUARD
-echo "8.8.8.8" >> "\$TMPDIR/wl_raw.lst"
+# FORCE DNS SAFEGUARD (Cloudflare)
 echo "1.1.1.1" >> "\$TMPDIR/wl_raw.lst"
+echo "1.0.0.1" >> "\$TMPDIR/wl_raw.lst"
 
 for c in \${WHITELIST_COUNTRIES:-}; do 
     curl -sfL -4 "https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset" >> "\$TMPDIR/wl_raw.lst" || true
@@ -254,7 +313,7 @@ sed "s/^/add blocklist_tmp /" "\$TMPDIR/bl_final.v4" | ipset restore -! 2>/dev/n
 ipset swap blocklist_tmp blocklist_all
 ipset destroy blocklist_tmp 2>/dev/null || true
 
-# Apply Rules (SAFE ORDER)
+# Apply Rules
 iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -i lo -j ACCEPT
 iptables -C INPUT -p udp --sport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -p udp --sport 53 -j ACCEPT
@@ -328,4 +387,4 @@ $INSTALL_DIR/update-firewall-blocklists.sh
 # Start timer AFTER manual run
 systemctl enable --now firewall-blocklist-updater.timer
 
-echo "✅ INSTALLATION COMPLETE! CrowdSec & Firewall running."
+echo "✅ INSTALLATION COMPLETE! CrowdSec (Port 42000+) & Firewall running."
