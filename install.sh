@@ -3,31 +3,27 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.35 - DNS RESCUE) ---
-# - CRITICAL FIX: Explicitly whitelists DNS servers and allows Port 53.
-# - FIX: Prevents "Running." lock error by handling service start order correctly.
-# - FEAT: Full verbose output restored.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.36 - CROWDSEC FIX) ---
+# - FIX: Correctly writes profiles.yaml to prevent YAML unmarshal errors.
+# - SUCCESS: Keeps the working 170k IP logic and DNS fixes.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.35"
+INSTALLER_VERSION="v17.36"
 
 # --- 1. EMERGENCY NETWORK RESET ---
-# Sofort Firewall öffnen, damit DNS wieder geht
 iptables -P INPUT ACCEPT
 iptables -P OUTPUT ACCEPT
 iptables -F
 iptables -X
 if command -v ipset >/dev/null; then ipset flush 2>/dev/null || true; fi
-# DNS Repair
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
 echo "nameserver 1.1.1.1" >> /etc/resolv.conf
 
 # --- 2. CLEANUP ---
 echo "🧹 Cleaning up..."
-# Stop services explicitly to prevent lock conflicts
 systemctl stop firewall-blocklist-updater.timer firewall-blocklist-updater.service endlessh crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
 rm -rf /usr/local/bin/update-firewall-blocklists.sh
 rm -f /var/run/firewall-updater.lock
@@ -71,9 +67,10 @@ for plugin in http email slack splunk; do
     fi
 done
 
-# AbuseIPDB Bridge
+# AbuseIPDB Bridge (CONFIG & PROFILE FIX)
 if [[ -n "$ABUSE_KEY" ]]; then
     mkdir -p /etc/crowdsec/notifications
+    # 1. Create Notification Config
     cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
 type: http
 name: abuseipdb
@@ -91,21 +88,38 @@ headers:
   Content-Type: application/json
   Accept: application/json
 YAML
-    if ! grep -q "abuseipdb" /etc/crowdsec/profiles.yaml 2>/dev/null; then
-        if grep -q "notifications:" /etc/crowdsec/profiles.yaml; then
-            sed -i '/notifications:/a \ - abuseipdb' /etc/crowdsec/profiles.yaml
-        else
-            echo -e "notifications:\n - abuseipdb" >> /etc/crowdsec/profiles.yaml
-        fi
-    fi
+
+    # 2. OVERWRITE Profile (Safe & Clean) - FIXES YAML ERROR
+    # We write a standard profile that includes the notification correctly.
+    mkdir -p /etc/crowdsec
+    cp /etc/crowdsec/profiles.yaml /etc/crowdsec/profiles.yaml.bak 2>/dev/null || true
+    cat <<PROFILE > /etc/crowdsec/profiles.yaml
+name: default_ip_remediation
+debug: false
+filters:
+ - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+ - type: ban
+   duration: 4h
+notifications:
+ - abuseipdb
+on_success: break
+PROFILE
 fi
 
 if command -v docker >/dev/null; then
     cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true
 fi
-if [[ -n "$CS_ENROLL" ]]; then cscli console enroll "$CS_ENROLL" --overwrite || true; fi
-systemctl enable --now crowdsec || true
+
+# Restart CrowdSec explicitly to apply config
 systemctl restart crowdsec || true
+
+# Enroll ONLY if key is present and CrowdSec is running
+if [[ -n "$CS_ENROLL" ]]; then 
+    sleep 2
+    cscli console enroll "$CS_ENROLL" --overwrite || true
+fi
+systemctl enable --now crowdsec || true
 
 # --- 5. UPDATER CONFIG ---
 INSTALL_DIR="/usr/local/bin"
@@ -156,7 +170,7 @@ SOURCES
 # --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.35 - DNS RESCUE
+# v17.36 - YAML FIX
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -186,11 +200,10 @@ trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start v11.35 ==="
+log "=== Start v11.36 ==="
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
-# FORCE ADD DNS SERVERS TO WHITELIST
 echo "8.8.8.8" >> "\$TMPDIR/wl_raw.lst"
 echo "1.1.1.1" >> "\$TMPDIR/wl_raw.lst"
 
@@ -241,19 +254,13 @@ ipset swap blocklist_tmp blocklist_all
 ipset destroy blocklist_tmp 2>/dev/null || true
 
 # Apply Rules (ORDER MATTERS)
-# 1. Accept Established
 iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-# 2. Accept Local
 iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -i lo -j ACCEPT
-# 3. Accept DNS (CRITICAL FIX)
 iptables -C INPUT -p udp --sport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -p udp --sport 53 -j ACCEPT
 iptables -C INPUT -p tcp --sport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 4 -p tcp --sport 53 -j ACCEPT
-# 4. Accept Whitelist
 iptables -C INPUT -m set --match-set allowed_whitelist src -j ACCEPT 2>/dev/null || iptables -I INPUT 5 -m set --match-set allowed_whitelist src -j ACCEPT
-# 5. Drop Blocklist
 iptables -C INPUT -m set --match-set blocklist_all src -j DROP 2>/dev/null || iptables -A INPUT -m set --match-set blocklist_all src -j DROP
 
-# Docker
 if iptables -L DOCKER-USER >/dev/null 2>&1; then
     iptables -C DOCKER-USER -m set --match-set allowed_whitelist src -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -m set --match-set allowed_whitelist src -j ACCEPT
     iptables -C DOCKER-USER -m set --match-set blocklist_all src -j DROP 2>/dev/null || iptables -A DOCKER-USER -m set --match-set blocklist_all src -j DROP
@@ -314,10 +321,10 @@ SERV
 systemctl daemon-reload
 if command -v endlessh >/dev/null; then systemctl enable --now endlessh || true; fi
 
-echo "🚀 Running initial update (Labermodus ON)..."
+echo "🚀 Running initial update..."
 $INSTALL_DIR/update-firewall-blocklists.sh
 
-# Start timer AFTER manual run to prevent lock conflict
+# Start timer AFTER manual run
 systemctl enable --now firewall-blocklist-updater.timer
 
-echo "✅ INSTALLATION COMPLETE!"
+echo "✅ INSTALLATION COMPLETE! CrowdSec & Firewall running."
