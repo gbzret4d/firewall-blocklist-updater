@@ -3,15 +3,16 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.36 - CROWDSEC FIX) ---
-# - FIX: Correctly writes profiles.yaml to prevent YAML unmarshal errors.
-# - SUCCESS: Keeps the working 170k IP logic and DNS fixes.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.37 - FINAL FIX) ---
+# - FIX: Replaces profiles.yaml entirely to fix YAML crash in CrowdSec.
+# - FIX: Internal version number updated to match installer.
+# - FEAT: AbuseIPDB Bridge, DNS Fix, Docker Support, 170k IPs.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.36"
+INSTALLER_VERSION="v17.37"
 
 # --- 1. EMERGENCY NETWORK RESET ---
 iptables -P INPUT ACCEPT
@@ -67,10 +68,10 @@ for plugin in http email slack splunk; do
     fi
 done
 
-# AbuseIPDB Bridge (CONFIG & PROFILE FIX)
+# AbuseIPDB Bridge (OVERWRITE PROFILE METHOD)
 if [[ -n "$ABUSE_KEY" ]]; then
     mkdir -p /etc/crowdsec/notifications
-    # 1. Create Notification Config
+    # 1. Config
     cat <<YAML > /etc/crowdsec/notifications/abuseipdb.yaml
 type: http
 name: abuseipdb
@@ -89,8 +90,7 @@ headers:
   Accept: application/json
 YAML
 
-    # 2. OVERWRITE Profile (Safe & Clean) - FIXES YAML ERROR
-    # We write a standard profile that includes the notification correctly.
+    # 2. Profile (Clean Rewrite to avoid YAML errors)
     mkdir -p /etc/crowdsec
     cp /etc/crowdsec/profiles.yaml /etc/crowdsec/profiles.yaml.bak 2>/dev/null || true
     cat <<PROFILE > /etc/crowdsec/profiles.yaml
@@ -111,10 +111,9 @@ if command -v docker >/dev/null; then
     cscli collections install crowdsecurity/docker --force >/dev/null 2>&1 || true
 fi
 
-# Restart CrowdSec explicitly to apply config
+# Restart to apply config
 systemctl restart crowdsec || true
 
-# Enroll ONLY if key is present and CrowdSec is running
 if [[ -n "$CS_ENROLL" ]]; then 
     sleep 2
     cscli console enroll "$CS_ENROLL" --overwrite || true
@@ -126,7 +125,7 @@ INSTALL_DIR="/usr/local/bin"
 CONF_DIR="/usr/local/etc/firewall-blocklist-updater"
 mkdir -p "$CONF_DIR/firewall-blocklists" "$CONF_DIR/backups"
 
-# --- SOURCES (Full 32 List) ---
+# --- SOURCES ---
 cat <<SOURCES > "$CONF_DIR/firewall-blocklists/blocklist.sources"
 https://www.spamhaus.org/drop/drop.txt
 https://www.spamhaus.org/drop/edrop.txt
@@ -170,7 +169,7 @@ SOURCES
 # --- UPDATER SCRIPT ---
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.36 - YAML FIX
+# v17.37 - FINAL CHECK
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -200,7 +199,7 @@ trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start v11.36 ==="
+log "=== Start v17.37 ==="
 
 # 1. Whitelist
 : > "\$TMPDIR/wl_raw.lst"
@@ -211,10 +210,9 @@ for c in \${WHITELIST_COUNTRIES:-}; do
     curl -sfL -4 "https://iplists.firehol.org/files/geolite2_country/country_\${c,,}.netset" >> "\$TMPDIR/wl_raw.lst" || true
 done
 if [[ -n "\$DYNDNS_HOST" ]]; then dig +short "\$DYNDNS_HOST" >> "\$TMPDIR/wl_raw.lst" || true; fi
-
 grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "\$TMPDIR/wl_raw.lst" | grep -vE "^0\.0\.0\.0$" > "\$TMPDIR/wl.v4"
 
-# 2. Blocklist (Verbose)
+# 2. Blocklist
 : > "\$TMPDIR/bl_raw.lst"
 if [[ -f "\$CONFIG_DIR/blocklist.sources" ]]; then
     while read -r line; do
@@ -241,7 +239,7 @@ grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "\$TMPDIR/bl_raw.lst" | gre
 # Filter
 comm -23 <(sort "\$TMPDIR/bl.v4") <(sort "\$TMPDIR/wl.v4") > "\$TMPDIR/bl_final.v4"
 
-# Load IPSet
+# IPSet
 ipset create allowed_whitelist hash:net family inet hashsize 4096 maxelem 2000000 -exist 2>/dev/null || true
 ipset flush allowed_whitelist
 sed "s/^/add allowed_whitelist /" "\$TMPDIR/wl.v4" | ipset restore -! 2>/dev/null
@@ -253,7 +251,7 @@ sed "s/^/add blocklist_tmp /" "\$TMPDIR/bl_final.v4" | ipset restore -! 2>/dev/n
 ipset swap blocklist_tmp blocklist_all
 ipset destroy blocklist_tmp 2>/dev/null || true
 
-# Apply Rules (ORDER MATTERS)
+# Apply Rules
 iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -i lo -j ACCEPT
 iptables -C INPUT -p udp --sport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -p udp --sport 53 -j ACCEPT
