@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Firewall Blocklist Updater periodically
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

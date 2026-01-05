@@ -1,0 +1,48 @@
+# --- High Confidence ---
+https://www.spamhaus.org/drop/drop.txt
+https://www.spamhaus.org/drop/edrop.txt
+https://www.spamhaus.org/drop/dropv6.txt
+https://feeds.dshield.org/block.txt
+https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+https://sslbl.abuse.ch/blacklist/sslipblacklist.txt
+
+# --- Aggregators ---
+https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt
+https://blocklist.greensnow.co/greensnow.txt
+https://iplists.firehol.org/files/greensnow.ipset
+https://lists.blocklist.de/lists/all.txt
+https://www.blocklist.de/downloads/export-ips_all.txt
+
+# --- Threat Intel & Mirrors ---
+https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt
+https://rules.emergingthreats.net/blockrules/compromised-ips.txt
+https://iplists.firehol.org/files/et_compromised.ipset
+https://www.binarydefense.com/banlist.txt
+https://iplists.firehol.org/files/bds_atif.ipset
+https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/binarydefense.txt
+
+# --- GitHub Lists ---
+https://github.com/borestad/blocklist-abuseipdb/raw/refs/heads/main/abuseipdb-s100-7d.ipv4
+https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/High
+https://github.com/ShadowWhisperer/IPs/raw/refs/heads/master/BruteForce/Extreme
+https://raw.githubusercontent.com/ShadowWhisperer/IPs/refs/heads/master/Malware/Hackers
+https://github.com/romainmarcoux/malicious-ip/raw/refs/heads/main/full-40k.txt
+https://raw.githubusercontent.com/romainmarcoux/malicious-outgoing-ip/refs/heads/main/full-outgoing-ip-40k.txt
+
+# --- IOCs & C2 ---
+https://raw.githubusercontent.com/elliotwutingfeng/ThreatFox-IOC-IPs/refs/heads/main/ips.txt
+https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/cobaltstrike_ips.txt
+https://github.com/CriticalPathSecurity/Public-Intelligence-Feeds/raw/refs/heads/master/alienvault.txt
+https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/compromised-ips.txt
+https://raw.githubusercontent.com/CriticalPathSecurity/Public-Intelligence-Feeds/refs/heads/master/illuminate.txt
+
+# --- FireHOL Collections ---
+https://cinsscore.com/list/ci-badguys.txt
+http://www.botvrij.eu/data/ioclist.ip-dst.raw
+https://iplists.firehol.org/files/cybercrime.ipset
+https://iplists.firehol.org/files/myip.ipset
+https://iplists.firehol.org/files/firehol_level1.netset
+https://iplists.firehol.org/files/sblam.ipset
+https://iplists.firehol.org/files/firehol_webclient.netset
+https://iplists.firehol.org/files/firehol_level2.netset
+https://iplists.firehol.org/files/botscout_7d.ipset

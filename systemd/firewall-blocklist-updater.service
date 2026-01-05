@@ -1,0 +1,15 @@
+[Unit]
+Description=Firewall Blocklist Updater Service
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/update-firewall-blocklists.sh
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
