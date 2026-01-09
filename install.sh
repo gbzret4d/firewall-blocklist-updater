@@ -3,15 +3,16 @@
 set -e
 set -o pipefail
 
-# --- FIREWALL & CROWDSEC INSTALLER (v17.64 - SILENT MODE) ---
-# - FEAT: Telegram alerts ONLY on errors (low blocklist count).
-# - FIX: Aggressive version cleaning prevents quote errors.
+# --- FIREWALL & CROWDSEC INSTALLER (v17.65 - HONEYPOT MODE) ---
+# - FEAT: Added HONEYPOT_MODE variable.
+#         If "true": Allows blocklisted IPs to hit port 2222 (Endlessh) to generate AbuseIPDB reports.
+# - CORE: Silent Mode, Smart Enroll, Auto-Update, Docker Safe.
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a 
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-INSTALLER_VERSION="v17.64"
+INSTALLER_VERSION="v17.65"
 UPDATE_URL="https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/install.sh"
 
 echo ""
@@ -141,6 +142,8 @@ WL_COUNTRIES="${WHITELIST_COUNTRIES:-${WHITELIST_COUNTRIES:-AT}}"
 BL_COUNTRIES="${BLOCKLIST_COUNTRIES:-${BLOCKLIST_COUNTRIES:-}}"
 TG_TOKEN="${TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
+# New Variable for v17.65
+H_MODE="${HONEYPOT_MODE:-${HONEYPOT_MODE:-false}}"
 
 if [[ -n "$ABUSE_KEY" ]]; then
     mkdir -p /etc/crowdsec/notifications
@@ -180,7 +183,7 @@ if command -v docker >/dev/null; then cscli collections install crowdsecurity/do
 
 fix_bouncer_config
 
-# --- SMART ENROLL CHECK (V17.64) ---
+# --- SMART ENROLL CHECK (V17.65) ---
 if [[ -n "$CS_ENROLL" ]]; then 
     if cscli console status 2>&1 | grep -E -i -q "manual|connected|enrolled"; then
         echo "✅ Already enrolled. Skipping re-enrollment."
@@ -237,7 +240,7 @@ SOURCES
 
 cat << EOF_UPDATER > "$INSTALL_DIR/update-firewall-blocklists.sh"
 #!/bin/bash
-# v17.64 - AUTO UPDATE (SILENT MODE)
+# v17.65 - AUTO UPDATE (HONEYPOT SUPPORT)
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="/usr/local/etc/firewall-blocklist-updater"
@@ -261,17 +264,13 @@ send_telegram() {
     fi 
 }
 
-# --- AUTO UPDATE CHECK ---
 check_for_updates() {
     local LATEST_SCRIPT="/tmp/latest_install.sh"
     local RAND=\$RANDOM
     if curl -s -f "\$REPO_URL?t=\$RAND" -o "\$LATEST_SCRIPT"; then
-        # AGGRESSIVE CLEAN: Keep only v, numbers, dots.
         local LATEST_VERSION=\$(grep 'INSTALLER_VERSION="' "\$LATEST_SCRIPT" | cut -d'"' -f2 | tr -cd 'v0-9.')
-        
         if [[ -n "\$LATEST_VERSION" && "\$LATEST_VERSION" != "\$CURRENT_VERSION" ]]; then
             log "🚀 New version found: \$LATEST_VERSION (Current: \$CURRENT_VERSION). Self-updating..."
-            # Removed: send_telegram "System updating..." to keep it silent on success.
             chmod +x "\$LATEST_SCRIPT"
             export DEBIAN_FRONTEND=noninteractive
             export NEEDRESTART_MODE=a
@@ -302,7 +301,7 @@ trap 'rm -f "/var/run/firewall-updater.lock" /tmp/firewall-blocklists/*' EXIT
 
 mkdir -p "\$BASE_DIR" "\$CONFIG_DIR" /tmp/firewall-blocklists
 TMPDIR="/tmp/firewall-blocklists"
-log "=== Start \$CURRENT_VERSION ==="
+log "=== Start \$CURRENT_VERSION (Honeypot: \${HONEYPOT_MODE:-false}) ==="
 
 run_maintenance
 
@@ -310,7 +309,6 @@ run_maintenance
 : > "\$TMPDIR/wl_raw.lst"
 echo "1.1.1.1" >> "\$TMPDIR/wl_raw.lst"
 echo "1.0.0.1" >> "\$TMPDIR/wl_raw.lst"
-
 echo "10.0.0.0/8" >> "\$TMPDIR/wl_raw.lst"
 echo "172.16.0.0/12" >> "\$TMPDIR/wl_raw.lst"
 echo "192.168.0.0/16" >> "\$TMPDIR/wl_raw.lst"
@@ -328,7 +326,6 @@ if [[ -f "\$CONFIG_DIR/blocklist.sources" ]]; then
         line=\$(echo "\$line" | tr -d '\r' | xargs)
         [[ "\$line" =~ ^#.*$ ]] && continue
         [[ -z "\$line" ]] && continue
-        
         echo -n "Downloading \$line ... "
         if wget --inet4-only --timeout=10 --tries=2 --user-agent="\$USER_AGENT" -qO- "\$line" >> "\$TMPDIR/bl_raw.lst"; then
             echo "OK"
@@ -366,6 +363,13 @@ iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -i lo -j AC
 iptables -C INPUT -p udp --sport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -p udp --sport 53 -j ACCEPT
 iptables -C INPUT -p tcp --sport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 4 -p tcp --sport 53 -j ACCEPT
 iptables -C INPUT -m set --match-set allowed_whitelist src -j ACCEPT 2>/dev/null || iptables -I INPUT 5 -m set --match-set allowed_whitelist src -j ACCEPT
+
+# --- HONEYPOT LOGIC ---
+if [[ "\${HONEYPOT_MODE:-false}" == "true" ]]; then
+    # Allow traffic to endlessh (2222) even from blocklisted IPs
+    iptables -C INPUT -p tcp --dport 2222 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 2222 -j ACCEPT
+fi
+
 iptables -C INPUT -m set --match-set blocklist_all src -j DROP 2>/dev/null || iptables -A INPUT -m set --match-set blocklist_all src -j DROP
 
 if iptables -L DOCKER-USER >/dev/null 2>&1; then
@@ -391,6 +395,7 @@ WHITELIST_COUNTRIES="$WL_COUNTRIES"
 BLOCKLIST_COUNTRIES="$BL_COUNTRIES"
 TELEGRAM_BOT_TOKEN="$TG_TOKEN"
 TELEGRAM_CHAT_ID="$TG_CHAT"
+HONEYPOT_MODE="$H_MODE"
 ENV
 chmod 600 "$CONF_DIR/firewall-blocklist-keys.env"
 
