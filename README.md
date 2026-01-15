@@ -1,10 +1,10 @@
 # 🛡️ Ultimate Firewall & CrowdSec Auto-Hardener
 
-![Version](https://img.shields.io/badge/version-v17.64-success?style=flat-square)
+![Version](https://img.shields.io/badge/version-v17.65-success?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian%20%7C%20AlmaLinux%20%7C%20Rocky-blue?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)
 
-> **Current Stable Release:** v17.64 (Silent Mode & Smart Enroll)
+> **Current Stable Release:** v17.65 (Honeypot Mode & IPv6 Support)
 
 This is a **production-grade, "set-and-forget" security suite** for Linux servers. It turns a fresh server into a fortress within seconds by installing CrowdSec, setting up a high-performance Iptables firewall, and deploying massive IP blocklists.
 
@@ -17,10 +17,12 @@ It is designed to be **self-healing** and **self-updating**, ensuring your serve
 ### 🧠 Intelligent Automation
 * **Smart Enrollment:** Automatically detects if the server is already linked to your CrowdSec Console. Prevents duplicate entries and "re-enrollment loops" on re-runs.
 * **Auto-Update System:** A systemd timer checks for script updates hourly.
-* **Silent Operation:** In `v17.64+`, the system runs silently in the background. You only receive Telegram notifications if something goes **wrong** (e.g., empty blocklists or update failures).
+* **Silent Operation:** The system runs silently in the background. You only receive Telegram notifications if something goes **wrong** (e.g., empty blocklists or update failures).
 
 ### 🛡️ Deep Security Layer
 * **CrowdSec Integration:** Full installation of the Security Engine + Iptables Bouncer. Automatically fixes common API port conflicts (e.g., port 8080 -> 42000).
+* **IPv6 Support:** Full support for IPv6 blocking. If your server has IPv6 enabled, both IPv4 and IPv6 blocklists are applied automatically.
+* **Honeypot Mode:** If enabled, it allows blocked IPs to access **only** port 2222 (Endlessh). This traps attackers and allows CrowdSec to report them to AbuseIPDB, effectively turning your server into a contributor to the global threat intelligence network.
 * **Endlessh (SSH Tarpit):** Moves your real SSH port and spins up a "trap" on port 2222. Attackers / bots get stuck in an infinite loop, wasting their resources while keeping your logs clean.
 * **Performance:** Uses **IPSet** (kernel-level hash sets) to handle over **150,000 blocked IPs** with zero performance impact on the CPU.
 
@@ -48,12 +50,13 @@ Run this one-liner on your server as **root** (or use `sudo`).
 Replace the variables with your own values.
 
 ```bash
-wget -O - [https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/install.sh](https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/install.sh) | sudo \
+wget -O - https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater/main/install.sh | sudo \
   ABUSEIPDB_API_KEY="YOUR_API_KEY" \
   CROWDSEC_ENROLL_KEY="YOUR_ENROLL_KEY" \
   DYNDNS_HOST="my-home.dyndns.org" \
   WHITELIST_COUNTRIES="AT DE US" \
   BLOCKLIST_COUNTRIES="" \
+  HONEYPOT_MODE="false" \
   TELEGRAM_BOT_TOKEN="123456:ABC-DEF..." \
   TELEGRAM_CHAT_ID="987654321" \
   bash
@@ -68,6 +71,7 @@ wget -O - [https://raw.githubusercontent.com/gbzret4d/firewall-blocklist-updater
 | `DYNDNS_HOST` | No | Your private DynDNS domain (e.g., from DuckDNS). This IP is always whitelisted. |
 | `WHITELIST_COUNTRIES` | No | ISO country codes (space-separated) to **never** block (e.g., `AT DE`). |
 | `BLOCKLIST_COUNTRIES` | No | ISO country codes to **always** block (Geo-Blocking). |
+| `HONEYPOT_MODE` | No | Set to `true` to allow blocked IPs to hit port 2222 (Endlessh) for reporting purposes. Default: `false` |
 | `TELEGRAM_BOT_TOKEN` | No | Bot Token for error alerts. |
 | `TELEGRAM_CHAT_ID` | No | Chat ID where alerts are sent. |
 
@@ -83,6 +87,7 @@ Ensure the blocklists are loaded into the kernel. You should see a high number o
 ```bash
 ipset list blocklist_all -t
 ```
+*(If IPv6 is enabled, check `blocklist_all_v6` as well)*
 
 ### 2. Check CrowdSec
 Verify that the bouncer is registered and the agent is running.
@@ -126,7 +131,7 @@ A: **No.** The script is idempotent. It detects that CrowdSec is already enrolle
 A: `tail -f /var/log/firewall-blocklist-updater.log`
 
 **Q: How do I whitelist an IP manually?**
-A: The script whitelists `1.1.1.1`, `1.0.0.1`, and private ranges (`192.168.x.x`, `10.x.x.x`) by default. To add more, edit the script logic or use your `DYNDNS_HOST` variable.
+A: The script whitelists `1.1.1.1`, `1.0.0.1`, and private ranges (`192.168.x.x`, `10.x.x.x`) by default. To add more, edit the script logic, use your `DYNDNS_HOST` variable, or add files to the whitelist loop in the script.
 
 ---
 
